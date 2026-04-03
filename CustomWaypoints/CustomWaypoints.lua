@@ -134,7 +134,7 @@ local function RefreshUiHeader()
             STATE.ui.legend:Hide()
         end
         if STATE.ui.checks then
-            if STATE.ui.checks.flying and STATE.ui.checks.flying.SetChecked then STATE.ui.checks.flying:SetChecked(db.hasFlyingMount and true or false) end
+            if STATE.ui.checks.flying and STATE.ui.checks.flying.SetChecked then STATE.ui.checks.flying:SetChecked(not db.hasFlyingMount and true or false) end
             if STATE.ui.checks.autosync and STATE.ui.checks.autosync.SetChecked then STATE.ui.checks.autosync:SetChecked(db.autoSyncToCarbonite and true or false) end
             if STATE.ui.checks.autoadvance and STATE.ui.checks.autoadvance.SetChecked then STATE.ui.checks.autoadvance:SetChecked(db.autoAdvance and true or false) end
             if STATE.ui.checks.flightmasters and STATE.ui.checks.flightmasters.SetChecked then STATE.ui.checks.flightmasters:SetChecked(db.useFlightMasters and true or false) end
@@ -1623,6 +1623,50 @@ local function PushHistorySnapshot(reason)
     wipe(STATE.future)
 end
 
+-- When the manual CW queue transitions from empty -> non-empty, stop Carbonite's
+-- quest auto-tracking so the HUD arrow / route focus stays on the manual waypoint.
+local function DisableCarboniteQuestAutoTrack(reason)
+    local que = Nx and Nx.Que
+    local wat = que and que.Wat
+    local didAnything = false
+
+    if wat and wat.CAT and wat.BAT1 then
+        local ok = pcall(function() wat:CAT() end)
+        if ok then
+            didAnything = true
+        end
+    end
+
+    if que and que.Tra1 then
+        local hadTracked = false
+        for _ in pairs(que.Tra1) do
+            hadTracked = true
+            break
+        end
+        que.Tra1 = {}
+        didAnything = didAnything or hadTracked
+    end
+
+    if wat and wat.BAT1 and wat.BAT1.SeP2 then
+        pcall(function() wat.BAT1:SeP2(false) end)
+    end
+    if wat and wat.Upd then
+        pcall(function() wat:Upd() end)
+    end
+
+    if didAnything then
+        dbg("Carbonite quest auto-track disabled" .. (reason and (": " .. tostring(reason)) or ""))
+    end
+
+    return didAnything
+end
+
+local function HandleQueueBecameNonEmpty(reason, wasEmpty)
+    if wasEmpty and STATE.db and #(STATE.db.destinations or {}) > 0 then
+        DisableCarboniteQuestAutoTrack(reason)
+    end
+end
+
 RouteToKnownLocation = function(index)
     EnsureDb()
     local allEntries = BuildKnownLocationEntries()
@@ -1632,6 +1676,7 @@ RouteToKnownLocation = function(index)
         return
     end
 
+    local wasEmpty = #(STATE.db.destinations or {}) == 0
     PushHistorySnapshot("route-known-location")
     wipe(STATE.db.destinations)
 
@@ -1640,6 +1685,7 @@ RouteToKnownLocation = function(index)
         for i = 1, #cloned do
             tinsert(STATE.db.destinations, cloned[i])
         end
+        HandleQueueBecameNonEmpty("route-known-location", wasEmpty)
         pr(format("loaded known route: %s (%d stop(s))", tostring(entry.name or index), #cloned))
     else
         local dest = CloneKnownLocationDestination(entry)
@@ -1648,6 +1694,7 @@ RouteToKnownLocation = function(index)
             return
         end
         tinsert(STATE.db.destinations, dest)
+        HandleQueueBecameNonEmpty("route-known-location", wasEmpty)
         pr(format("routing to known location: %s", tostring(entry.name or dest.mapName or dest.maI)))
     end
 
@@ -3077,7 +3124,7 @@ local function EnsureUi()
     end
 
     local checks = {}
-    checks.flying = MakeCheckbox("Flying", 0, -122, function() SlashHandler("hasflying") end)
+    checks.flying = MakeCheckbox("Micro Routing", 0, -122, function() SlashHandler("hasflying") end)
     checks.autosync = MakeCheckbox("AutoSync", 100, -122, function() SlashHandler("autosync") end)
     checks.autoadvance = MakeCheckbox("AutoAdvance", 200, -122, function() SlashHandler("autoadvance") end)
     checks.flightmasters = MakeCheckbox("FlightMasters", 300, -122, function() SlashHandler("flightmasters") end)
@@ -5481,9 +5528,11 @@ local function AddCurrentCursorWaypoint()
         return
     end
 
+    local wasEmpty = #(STATE.db.destinations or {}) == 0
     PushHistorySnapshot("add-waypoint")
     STATE.lastCaptureTime = GetTime() or 0
     tinsert(STATE.db.destinations, dest)
+    HandleQueueBecameNonEmpty("add-waypoint", wasEmpty)
     dbg(format("saved #%d => GCMI=%d (%s) zx=%.1f zy=%.1f wx=%.3f wy=%.3f",
         #STATE.db.destinations, dest.maI, dest.mapName or "?", dest.zx or -1, dest.zy or -1, dest.wx or -1, dest.wy or -1))
 
@@ -5512,12 +5561,14 @@ AddLabeledCurrentCursorWaypoint = function()
         defaultLabel = "wp",
         defaultDescription = "",
         onSave = function(meta)
+            local wasEmpty = #(STATE.db.destinations or {}) == 0
             PushHistorySnapshot("add-labeled-waypoint")
             STATE.lastCaptureTime = GetTime() or 0
             dest.userName = meta.name ~= "" and meta.name or nil
             dest.userLabel = meta.label ~= "" and meta.label or nil
             dest.description = meta.description ~= "" and meta.description or nil
             tinsert(STATE.db.destinations, dest)
+            HandleQueueBecameNonEmpty("add-labeled-waypoint", wasEmpty)
             InvalidateRoute("labeled waypoint added")
             RefreshUiHeader()
             if STATE.db.autoSyncToCarbonite then
@@ -5540,11 +5591,13 @@ AddCurrentLocationWaypoint = function()
         return
     end
 
+    local wasEmpty = #(STATE.db.destinations or {}) == 0
     PushHistorySnapshot("add-current-location-waypoint")
     STATE.lastCaptureTime = GetTime() or 0
     dest.userLabel = dest.userLabel or "wp"
     dest.ts = date("%Y-%m-%d %H:%M:%S")
     tinsert(STATE.db.destinations, dest)
+    HandleQueueBecameNonEmpty("add-current-location-waypoint", wasEmpty)
     InvalidateRoute("current location waypoint added")
     RefreshUiHeader()
     if STATE.db.autoSyncToCarbonite then
@@ -5571,6 +5624,7 @@ AddCurrentLocationWithMetadataPopup = function()
         defaultLabel = "wp",
         defaultDescription = "",
         onSave = function(meta)
+            local wasEmpty = #(STATE.db.destinations or {}) == 0
             PushHistorySnapshot("add-current-location-waypoint")
             STATE.lastCaptureTime = GetTime() or 0
             dest.userName = meta.name ~= "" and meta.name or nil
@@ -5578,6 +5632,7 @@ AddCurrentLocationWithMetadataPopup = function()
             dest.description = meta.description ~= "" and meta.description or nil
             dest.ts = date("%Y-%m-%d %H:%M:%S")
             tinsert(STATE.db.destinations, dest)
+            HandleQueueBecameNonEmpty("add-current-location-waypoint", wasEmpty)
             InvalidateRoute("current location waypoint added")
             RefreshUiHeader()
             if STATE.db.autoSyncToCarbonite then
@@ -5933,12 +5988,14 @@ ImportWaypointsFromText = function(text)
     table.sort(parsed, function(a, b)
         return (a._importOrder or 0) < (b._importOrder or 0)
     end)
+    local wasEmpty = #(STATE.db.destinations or {}) == 0
     PushHistorySnapshot("import-waypoints")
     wipe(STATE.db.destinations)
     for _, d in ipairs(parsed) do
         d._importOrder = nil
         tinsert(STATE.db.destinations, d)
     end
+    HandleQueueBecameNonEmpty("import-waypoints", wasEmpty)
     InvalidateRoute("import-waypoints")
     if STATE.db.autoSyncToCarbonite then
         SyncQueueToCarbonite()
@@ -6526,7 +6583,7 @@ SlashHandler = function(msg)
         STATE.db.autoAdvance = not STATE.db.autoAdvance
         pr("autoAdvance=" .. tostring(STATE.db.autoAdvance))
         RefreshUiHeader()
-    elseif msg == "hasflying" or msg == "toggleflying" or msg == "flymode" then
+    elseif msg == "hasflying" or msg == "toggleflying" or msg == "flymode" or "microrouting" then
         STATE.db.hasFlyingMount = not STATE.db.hasFlyingMount
         InvalidateRoute("hasFlyingMount toggled")
         pr("hasFlyingMount=" .. tostring(STATE.db.hasFlyingMount))
