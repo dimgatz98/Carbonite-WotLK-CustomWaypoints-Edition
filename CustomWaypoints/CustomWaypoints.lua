@@ -40,7 +40,7 @@ local AddLabeledCurrentCursorWaypoint
 local AddCurrentLocationWaypoint
 local AddCurrentLocationWithMetadataPopup
 local EnsureCarboniteMapButtons
-routeSelectedBtn = routeSelectedBtn
+local routeSelectedBtn
 
 CustomWaypoints = CustomWaypoints or {}
 local CW = CustomWaypoints
@@ -48,7 +48,7 @@ local CW = CustomWaypoints
 local TARGET_TYPE_GOTO = "Goto"
 local TARGET_TYPE_STRAIGHT = "CW_STRAIGHT"
 
-STRAIGHT_EDGE_TYPES = {
+local STRAIGHT_EDGE_TYPES = {
     boat = true,
     zeppelin = true,
     tram = true,
@@ -57,7 +57,7 @@ STRAIGHT_EDGE_TYPES = {
     taxi = true,
 }
 
-TRANSIT_EDGE_TYPES = {
+local TRANSIT_EDGE_TYPES = {
     boat = true,
     zeppelin = true,
     tram = true,
@@ -267,7 +267,6 @@ STATE = {
     knownLocationsSpecialRegistered = false,
     dismissedConfirmation = nil,
     recentConfirmation = nil,
-    ignoredConfirmationKeys = {},
     activeConfirmationKey = nil,
     pendingTransportKey = nil,
     cwModalStack = {},
@@ -345,6 +344,7 @@ function BuildTransportConfirmationKey(fromPos, toPos)
         return table.concat({
             "instance",
             tostring(toPos.maI or "?"),
+            NormalizeKnownInstanceName(toPos),
             tostring(toPos.instanceType or "instance"),
         }, "|")
     end
@@ -383,25 +383,6 @@ local function MarkConfirmationRecentlyHandled(fromPos, toPos, seconds)
         key = BuildTransportConfirmationKey(fromPos, toPos),
         untilTime = (GetTime and GetTime() or 0) + (seconds or 10),
     }
-end
-
-local function IgnoreConfirmationCandidate(fromPos, toPos)
-    local key = BuildTransportConfirmationKey(fromPos, toPos)
-    if not key then return end
-    STATE.ignoredConfirmationKeys = STATE.ignoredConfirmationKeys or {}
-    STATE.ignoredConfirmationKeys[key] = true
-end
-
-local function IsConfirmationIgnored(fromPos, toPos)
-    local key = BuildTransportConfirmationKey(fromPos, toPos)
-    return key and STATE.ignoredConfirmationKeys and STATE.ignoredConfirmationKeys[key] == true
-end
-
-local function ClearIgnoredConfirmationCandidate(fromPos, toPos)
-    local key = BuildTransportConfirmationKey(fromPos, toPos)
-    if key and STATE.ignoredConfirmationKeys then
-        STATE.ignoredConfirmationKeys[key] = nil
-    end
 end
 
 local function WasConfirmationRecentlyHandled(fromPos, toPos)
@@ -446,6 +427,18 @@ local function HideTopCwModalFrame()
         end
     end
     return false
+end
+
+local function ArmKeyboardModalFrame(frame)
+    if not frame then return end
+    PushCwModalFrame(frame)
+    if frame.EnableKeyboard then
+        pcall(function() frame:EnableKeyboard(false) end)
+        pcall(function() frame:EnableKeyboard(true) end)
+    end
+    if frame.SetPropagateKeyboardInput then
+        pcall(function() frame:SetPropagateKeyboardInput(true) end)
+    end
 end
 
 local function ColorizeEdgeName(edgeType, textLabel)
@@ -819,6 +812,7 @@ local function ToggleRoutingTuningUi()
     else
         RefreshRoutingTuningUi()
         STATE.tuningUi.frame:Show()
+        ArmKeyboardModalFrame(STATE.tuningUi.frame)
     end
 end
 
@@ -2232,8 +2226,18 @@ ShowKnownLocationsFrame = function()
     f:EnableMouse(true)
     f:SetMovable(true)
     f:RegisterForDrag("LeftButton")
+    if f.EnableKeyboard then f:EnableKeyboard(true) end
+    if f.SetPropagateKeyboardInput then f:SetPropagateKeyboardInput(true) end
     f:SetScript("OnDragStart", function(self) self:StartMoving() end)
     f:SetScript("OnDragStop", function(self) self:StopMovingOrSizing() end)
+    f:SetScript("OnKeyDown", function(self, key)
+        if self.SetPropagateKeyboardInput then
+            self:SetPropagateKeyboardInput(key == "ESCAPE" and false or true)
+        end
+        if key == "ESCAPE" then
+            self:Hide()
+        end
+    end)
 
     if UISpecialFrames and not STATE.knownLocationsSpecialRegistered then
         tinsert(UISpecialFrames, "CustomWaypointsKnownLocationsFrame")
@@ -2406,6 +2410,7 @@ local function ShowTransportManagementFrame()
             STATE.transportManagementFrame:Hide()
         else
             STATE.transportManagementFrame:Show()
+            ArmKeyboardModalFrame(STATE.transportManagementFrame)
         end
         return
     end
@@ -2596,7 +2601,7 @@ local function ShowTransportManagementFrame()
     end)
 
     local function ShowClearAllConfirmation(onConfirm)
-        local cf = CreateFrame("Frame", "CustomWaypointsTransportManagementConfirm", UIParent)
+        local cf = CreateFrame("Frame", "CustomWaypointsTransportManagement", UIParent)
         cf:SetWidth(360)
         cf:SetHeight(150)
         cf:SetPoint("CENTER", UIParent, "CENTER", 0, 0)
@@ -2668,7 +2673,7 @@ local function ShowTransportManagementFrame()
         end)
 
         if UISpecialFrames then
-            tinsert(UISpecialFrames, "CustomWaypointsTransportManagementConfirm")
+            tinsert(UISpecialFrames, "CustomWaypointsTransportManagement")
         end
 
         cf:Show()
@@ -2717,9 +2722,22 @@ local function ShowTransportManagementFrame()
         STATE.transportManagementSpecialRegistered = true
     end
 
+    f:SetScript("OnShow", function(self)
+        PushCwModalFrame(self)
+        if self.EnableKeyboard then self:EnableKeyboard(true) end
+        if self.SetPropagateKeyboardInput then self:SetPropagateKeyboardInput(true) end
+    end)
+
+    f:SetScript("OnHide", function(self)
+        RemoveCwModalFrame(self)
+        if self.SetPropagateKeyboardInput then self:SetPropagateKeyboardInput(true) end
+        if self.EnableKeyboard then self:EnableKeyboard(false) end
+    end)
+
     STATE.transportManagementFrame = f
     RefreshTransportList()
     f:Show()
+    ArmKeyboardModalFrame(f)
 end
 
 function CustomWaypoints_ToggleKnownLocations()
@@ -3179,6 +3197,7 @@ local function ToggleUi()
     else
         RefreshUiHeader()
         STATE.ui.frame:Show()
+        ArmKeyboardModalFrame(STATE.ui.frame)
     end
 end
 
@@ -3648,9 +3667,6 @@ local function BeginPendingTransport(reason, fromPos)
     local keySeedTo = GetPlayerWorldPos and GetPlayerWorldPos() or nil
     local key = nil
     if keySeedTo then
-        if keySeedTo.maI == fromPos.maI and not (keySeedTo.instance and not fromPos.instance) then
-            return
-        end
         key = BuildTransportConfirmationKey(fromPos, keySeedTo)
     end
 
@@ -3659,18 +3675,6 @@ local function BeginPendingTransport(reason, fromPos)
     end
 
     if key and STATE.pendingTransportKey and STATE.pendingTransportKey == key then
-        return
-    end
-
-    if keySeedTo and IsConfirmationIgnored(fromPos, keySeedTo) then
-        return
-    end
-
-    if keySeedTo and IsConfirmationDismissed(fromPos, keySeedTo) then
-        return
-    end
-
-    if keySeedTo and WasConfirmationRecentlyHandled(fromPos, keySeedTo) then
         return
     end
 
@@ -3741,7 +3745,6 @@ local function ShowTransportConfirmationFrame()
             if p2 then
                 DismissConfirmationCandidate(p2.fromPos, p2.toPos, 30)
                 MarkConfirmationRecentlyHandled(p2.fromPos, p2.toPos, 30)
-                IgnoreConfirmationCandidate(p2.fromPos, p2.toPos)
                 if p2.toPos and p2.toPos.instance and p2.toPos.maI then
                     STATE.lastStablePlayerPos = CloneWorldPoint(p2.toPos)
                 end
@@ -3864,7 +3867,6 @@ local function ShowTransportConfirmationFrame()
         if p2 then
             DismissConfirmationCandidate(p2.fromPos, p2.toPos, 30)
             MarkConfirmationRecentlyHandled(p2.fromPos, p2.toPos, 30)
-            IgnoreConfirmationCandidate(p2.fromPos, p2.toPos)
             if p2.toPos and p2.toPos.instance and p2.toPos.maI then
                 STATE.lastStablePlayerPos = CloneWorldPoint(p2.toPos)
             end
@@ -3894,12 +3896,8 @@ local function ShowTransportConfirmationFrame()
     f:SetScript("OnHide", function(self)
         local p2 = STATE.pendingConfirmationTransport
         if p2 then
-            DismissConfirmationCandidate(p2.fromPos, p2.toPos, 30)
-            MarkConfirmationRecentlyHandled(p2.fromPos, p2.toPos, 30)
-            IgnoreConfirmationCandidate(p2.fromPos, p2.toPos)
-            if p2.toPos and p2.toPos.instance and p2.toPos.maI then
-                STATE.lastStablePlayerPos = CloneWorldPoint(p2.toPos)
-            end
+            DismissConfirmationCandidate(p2.fromPos, p2.toPos, 12)
+            MarkConfirmationRecentlyHandled(p2.fromPos, p2.toPos, 12)
             STATE.pendingConfirmationTransport = nil
         end
         RemoveCwModalFrame(self)
@@ -3915,11 +3913,6 @@ end
 local function RequestLearnedTransportConfirmation(fromPos, toPos, reason)
     if not fromPos or not toPos then return end
     EnsureDb()
-
-    if IsConfirmationIgnored(fromPos, toPos) then
-        dbg("confirmation suppressed for ignored transport/instance")
-        return
-    end
 
     if IsConfirmationDismissed(fromPos, toPos) then
         dbg("confirmation suppressed for recently dismissed transport/instance")
@@ -4059,7 +4052,7 @@ local function PulseTransportDiscovery(elapsed)
                 else
                     dbg("ignored map hop: " .. tostring(why) .. " from=" .. tostring(STATE.pendingTransport.from.mapName) .. " to=" .. tostring(current.mapName))
                 end
-                if current and (current.maI or (current.wx and current.wy)) then
+                if current and current.wx and current.wy then
                     STATE.lastStablePlayerPos = CloneWorldPoint(current)
                 end
                 ClearPendingTransport()
@@ -6538,10 +6531,7 @@ local function OnEvent(_, event)
         ScheduleLoginQueueSyncIfNeeded()
         EnsureCarboniteMapButtons()
         if STATE.lastStablePlayerPos then
-            local current = GetPlayerWorldPos and GetPlayerWorldPos() or nil
-            if current and current.maI and current.maI ~= STATE.lastStablePlayerPos.maI then
-                BeginPendingTransport("PLAYER_ENTERING_WORLD", STATE.lastStablePlayerPos)
-            end
+            BeginPendingTransport("PLAYER_ENTERING_WORLD", STATE.lastStablePlayerPos)
         end
     elseif event == "ZONE_CHANGED" or event == "ZONE_CHANGED_NEW_AREA" or event == "ZONE_CHANGED_INDOORS" then
         EnsureDb()
@@ -6633,7 +6623,7 @@ do
         "CustomWaypointsKnownLocationsImportPopup",
         "CustomWaypointsKnownRouteEditorPopup",
         "CustomWaypointsRoutingTuningFrame",
-        "CustomWaypointsTransportManagementConfirm",
+        "CustomWaypointsTransportManagement",
     }
 
     local function CwRemoveFromSpecialFrames(frameName)
@@ -6668,6 +6658,9 @@ do
                 if self.EnableKeyboard and self.IsShown and self:IsShown() then
                     pcall(function() self:EnableKeyboard(true) end)
                 end
+                if self.SetPropagateKeyboardInput then
+                    pcall(function() self:SetPropagateKeyboardInput(true) end)
+                end
                 if old then return old(self, ...) end
             end
         end)
@@ -6675,6 +6668,9 @@ do
         CwWrapScript(frame, "OnHide", function(old)
             return function(self, ...)
                 RemoveCwModalFrame(self)
+                if self.SetPropagateKeyboardInput then
+                    pcall(function() self:SetPropagateKeyboardInput(true) end)
+                end
                 if self.EnableKeyboard then
                     pcall(function() self:EnableKeyboard(false) end)
                 end
@@ -6699,8 +6695,20 @@ do
         CwWrapScript(frame, "OnKeyDown", function(old)
             return function(self, key, ...)
                 PushCwModalFrame(self)
+                if self.SetPropagateKeyboardInput then
+                    pcall(function() self:SetPropagateKeyboardInput(key == "ESCAPE" and false or true) end)
+                end
                 if key == "ESCAPE" then
-                    if HideTopCwModalFrame() then return end
+                    local wasShown = self.IsShown and self:IsShown()
+                    if old then
+                        local result = old(self, key, ...)
+                        if not (self.IsShown and self:IsShown()) then
+                            return result
+                        end
+                    end
+                    if wasShown and self.IsShown and self:IsShown() then
+                        if HideTopCwModalFrame() then return end
+                    end
                     return
                 end
                 if old then return old(self, key, ...) end
@@ -6727,7 +6735,13 @@ do
         local oldEscape = editBox:GetScript("OnEscapePressed")
         editBox:SetScript("OnEscapePressed", function(self, ...)
             if self.ClearFocus then self:ClearFocus() end
-            if ownerFrame then PushCwModalFrame(ownerFrame) end
+            if ownerFrame then
+                PushCwModalFrame(ownerFrame)
+                local onKeyDown = ownerFrame.GetScript and ownerFrame:GetScript("OnKeyDown")
+                if onKeyDown then
+                    return onKeyDown(ownerFrame, "ESCAPE")
+                end
+            end
             if HideTopCwModalFrame() then return end
             if oldEscape then return oldEscape(self, ...) end
         end)
