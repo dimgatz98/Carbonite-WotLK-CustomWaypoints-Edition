@@ -1,5 +1,9 @@
 # Carbonite 3.3.5a (Remastered) + CustomWaypoints
 
+![Multiple waypoints routing through different zones/continents](CustomWaypoints/samples/screenshots/image.png)
+
+*Multiple waypoints routing through different zones/continents.*
+
 This repo bundles a **Wrath-era (3.3.5a)** Carbonite tree with **CustomWaypoints** — a separate addon that layers a waypoint queue and transport-aware routing on top, without editing Carbonite’s own files.
 
 | Folder | What’s inside |
@@ -17,6 +21,21 @@ This repo bundles a **Wrath-era (3.3.5a)** Carbonite tree with **CustomWaypoints
 > ⚠️ Important: This functionality only works on the character’s current map (via the minimap). Use the world map to navigate between different zones.
 3. Maintenance / “what must not break” lives in **`CustomWaypoints/CHECKPOINT.md`**.
 
+---
+## Keyboard Shortcuts
+
+| Shortcut | Action |
+|----------|--------|
+| **Shift + Left Click** | Capture waypoint from Carbonite world map |
+| **Ctrl + Right Click** | Fallback waypoint capture |
+| **Ctrl + Shift + Z** | Undo last action |
+| **Ctrl + Shift + Y** | Redo last undone action |
+| **Shift + R** | Save waypoint at current player location and disable auto-advance  -- debug/route-recording feature (Save Here) |
+| **SHIFT + G** | Open Known Locations window |
+| **ESC** | Close most recently opened CustomWaypoints UI frame |
+| **DELETE** | Delete selected entries (e.g. in Known Locations UI) |
+
+> ⚠️ Note: Some keybinds may not work if overridden by other addons (e.g. Carbonite) or existing WoW bindings.
 ---
 
 ## Key Features
