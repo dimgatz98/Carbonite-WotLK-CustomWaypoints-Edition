@@ -3300,10 +3300,12 @@ ExportKnownLocations = function()
     local blob = table.concat(lines, "\n")
     local displayBlob = EscapeForDisplay(blob)
 
-    pr("----- COPY KNOWN LOCATIONS FROM HERE -----")
     AppendUiLogLine(displayBlob)
-    pr("----- COPY KNOWN LOCATIONS TO HERE -----")
-    dbg(displayBlob)
+    pr(lines[1])
+    for i = 2, #lines - 1 do
+        pr(lines[i])
+    end
+    pr(lines[#lines])
     pr(format("known locations export: %d known location(s), %d transport(s)", #known, #learned))
 end
 
@@ -4316,29 +4318,38 @@ local function InstallUndoRedoBindings()
         end)
         b:Hide()
     end
-    if not _G.CWPhase5BClearHotkeyButton then
-        local b = CreateFrame("Button", "CWPhase5BClearHotkeyButton", UIParent)
-        b:SetScript("OnClick", function()
-            EnsureDb()
-            local d = STATE.db and STATE.db.destinations or nil
-            if not d or #d == 0 then
-                pr("clear: queue already empty")
-                return
-            end
 
-            PushHistorySnapshot("hotkey-clear")
-            wipe(d)
-            InvalidateRoute("hotkey-clear")
-            if STATE.db.autoSyncToCarbonite then
-                SyncQueueToCarbonite()
-            else
-                ClearCarboniteTargets()
-            end
-            pr("queue cleared (Ctrl+Shift+C)")
-            RefreshUiHeader()
-        end)
+    local b = _G.CWPhase5BClearHotkeyButton
+    if not b then
+        b = CreateFrame("Button", "CWPhase5BClearHotkeyButton", UIParent)
         b:Hide()
     end
+
+    b:SetScript("OnClick", function()
+        EnsureDb()
+
+        local map = GetMap()
+        ClearCarboniteTargets(map)
+
+        local d = STATE.db and STATE.db.destinations or nil
+        if not d or #d == 0 then
+            pr("clear: queue already empty")
+            return
+        end
+
+        PushHistorySnapshot("hotkey-clear")
+        wipe(d)
+        InvalidateRoute("hotkey-clear")
+
+        if STATE.db.autoSyncToCarbonite then
+            SyncQueueToCarbonite()
+        else
+            ClearCarboniteTargets()
+        end
+
+        pr("queue cleared (Ctrl+Shift+C)")
+        RefreshUiHeader()
+    end)
 
     local undoClick = "CLICK CWPhase5BUndoHotkeyButton:LeftButton"
     local redoClick = "CLICK CWPhase5BRedoHotkeyButton:LeftButton"
@@ -6877,6 +6888,10 @@ local function ShowWaypointMetadataPopup(opts)
         })
     end
 
+    local FocusMetadataBox
+    local FocusNextMetadataBox
+    local metadataBoxes
+    local CommitWaypointMetadata
     local title = f:CreateFontString(nil, "OVERLAY", "GameFontNormal")
     title:SetPoint("TOP", f, "TOP", 0, -12)
     title:SetText(opts.title or "Waypoint metadata")
@@ -6892,6 +6907,14 @@ local function ShowWaypointMetadataPopup(opts)
     nameBox:SetPoint("LEFT", nameLabel, "RIGHT", 10, 0)
     nameBox:SetText(opts.defaultName or "")
     nameBox:SetScript("OnEscapePressed", function(self) self:ClearFocus() end)
+    nameBox:SetScript("OnEnterPressed", function(self)
+        self:ClearFocus()
+        CommitWaypointMetadata()
+    end)
+    nameBox:SetScript("OnTabPressed", function(self)
+        self:ClearFocus()
+        FocusNextMetadataBox(self, IsShiftKeyDown and IsShiftKeyDown())
+    end)
 
     local labelLabel = f:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
     labelLabel:SetPoint("TOPLEFT", nameLabel, "BOTTOMLEFT", 0, -22)
@@ -6904,6 +6927,14 @@ local function ShowWaypointMetadataPopup(opts)
     labelBox:SetPoint("LEFT", labelLabel, "RIGHT", 10, 0)
     labelBox:SetText(opts.defaultLabel or "")
     labelBox:SetScript("OnEscapePressed", function(self) self:ClearFocus() end)
+    labelBox:SetScript("OnEnterPressed", function(self)
+        self:ClearFocus()
+        CommitWaypointMetadata()
+    end)
+    labelBox:SetScript("OnTabPressed", function(self)
+        self:ClearFocus()
+        FocusNextMetadataBox(self, IsShiftKeyDown and IsShiftKeyDown())
+    end)
 
     local descLabel = f:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
     descLabel:SetPoint("TOPLEFT", labelLabel, "BOTTOMLEFT", 0, -22)
@@ -6916,7 +6947,15 @@ local function ShowWaypointMetadataPopup(opts)
     descBox:SetPoint("LEFT", descLabel, "RIGHT", 10, 0)
     descBox:SetText(opts.defaultDescription or "")
     descBox:SetScript("OnEscapePressed", function(self) self:ClearFocus() end)
-
+    descBox:SetScript("OnEnterPressed", function(self)
+        self:ClearFocus()
+        CommitWaypointMetadata()
+    end)
+    descBox:SetScript("OnTabPressed", function(self)
+        self:ClearFocus()
+        FocusNextMetadataBox(self, IsShiftKeyDown and IsShiftKeyDown())
+    end)
+    
     local extraCheckboxes = {}
     local lastAnchor = descLabel
     if type(opts.extraCheckboxes) == "table" and #opts.extraCheckboxes > 0 then
@@ -6938,12 +6977,43 @@ local function ShowWaypointMetadataPopup(opts)
         end
     end
 
-    local saveBtn = CreateFrame("Button", nil, f, "UIPanelButtonTemplate")
-    saveBtn:SetWidth(80)
-    saveBtn:SetHeight(22)
-    saveBtn:SetPoint("BOTTOMLEFT", f, "BOTTOMLEFT", 16, 16)
-    saveBtn:SetText("Save")
-    saveBtn:SetScript("OnClick", function()
+    FocusMetadataBox = function(box)
+        if box and box.SetFocus then
+            box:SetFocus()
+            if box.HighlightText then
+                box:HighlightText()
+            end
+        end
+    end
+
+    metadataBoxes = { nameBox, labelBox, descBox }
+
+    FocusNextMetadataBox = function(current, backwards)
+        local currentIndex = 1
+        for i, box in ipairs(metadataBoxes) do
+            if box == current then
+                currentIndex = i
+                break
+            end
+        end
+
+        local nextIndex
+        if backwards then
+            nextIndex = currentIndex - 1
+            if nextIndex < 1 then
+                nextIndex = #metadataBoxes
+            end
+        else
+            nextIndex = currentIndex + 1
+            if nextIndex > #metadataBoxes then
+                nextIndex = 1
+            end
+        end
+
+        FocusMetadataBox(metadataBoxes[nextIndex])
+    end
+
+    CommitWaypointMetadata = function()
         if opts.onSave then
             local extraValues = {}
             for _, info in ipairs(extraCheckboxes) do
@@ -6957,7 +7027,14 @@ local function ShowWaypointMetadataPopup(opts)
             })
         end
         f:Hide()
-    end)
+    end
+    
+    local saveBtn = CreateFrame("Button", nil, f, "UIPanelButtonTemplate")
+    saveBtn:SetWidth(80)
+    saveBtn:SetHeight(22)
+    saveBtn:SetPoint("BOTTOMLEFT", f, "BOTTOMLEFT", 16, 16)
+    saveBtn:SetText("Save")
+    saveBtn:SetScript("OnClick", CommitWaypointMetadata)
 
     local cancelBtn = CreateFrame("Button", nil, f, "UIPanelButtonTemplate")
     cancelBtn:SetWidth(80)
@@ -6988,7 +7065,7 @@ local function ShowWaypointMetadataPopup(opts)
 
     ArmKeyboardModalFrame(f)
     f:Show()
-    if nameBox.SetFocus then nameBox:SetFocus() end
+    FocusMetadataBox(nameBox)
 end
 
 CW.ShowWaypointMetadataPopup = ShowWaypointMetadataPopup
@@ -7511,11 +7588,12 @@ local function ExportWaypoints()
     lines[#lines + 1] = "----- COPY TO HERE -----"
     local blob = table.concat(lines, "\n")
     AppendUiLogLine(blob)
-    dbg(blob)
-    pr(format("export: %d waypoint(s) in block (%d data lines). Select all in CW log, copy, paste into Import.", n, n))
-    for i = 1, n do
-        dbg(lines[1 + i])
+    pr(lines[1])
+    for i = 2, #lines - 1 do
+        pr(lines[i])
     end
+    pr(lines[#lines])
+    pr(format("export: %d waypoint(s) in block (%d data lines). Select all in CW log, copy, paste into Import.", n, n))
 end
 
 SlashHandler = function(msg)
