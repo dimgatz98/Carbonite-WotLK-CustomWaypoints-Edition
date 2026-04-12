@@ -171,17 +171,17 @@ While it enables advanced pathfinding across:
 
 it may still:
 - miss valid optimal routes
-- fall back to cross-continent shortcuts incorrectly
-- behave inconsistently depending on discovered nodes
+- behave inconsistently depending on discovered nodes or FM nodes
 
 ### Recommendation
-For stable behavior:
+For stable behavior and to avoid small lags:
 - use **minimal routing mode** (Carbonite-driven)
 
 Use deep routing only for:
-- testing
-- experimentation
+- smart experimental routing / path validation
+- data gathering
 - contributing feedback / debugging
+- If you are willing to sacrifice performance for precision
 
 ### Notes
 - transport graph and heuristics are still evolving

@@ -92,7 +92,7 @@ local DEFAULTS = {
     useIntercontinentalRouting = true,
     useFlightMasters = true,
     hasFlyingMount = false,
-    simplifyTransitWaypoints = false,
+    simplifyTransitWaypoints = true,
     showUi = true,
     uiScale = 1,
     transportDiscoveryEnabled = true,
@@ -291,6 +291,13 @@ local function GetRoutingTuning()
         end
     end
     return out
+end
+
+local function IsTransitSimplifiedEffective()
+    if STATE and STATE.taxiForceSimplifyTransitWaypoints then
+        return true
+    end
+    return STATE.db and STATE.db.simplifyTransitWaypoints == true
 end
 
 local function GetEdgeTransportKind(edge)
@@ -539,6 +546,13 @@ STATE = {
     lastGroundPlayerPos = nil,
     wasOnTaxi = false,
     pendingTaxiRouteRefresh = false,
+    taxiMicroRoutingWasSimplified = nil,
+    taxiNextRefreshAt = 0,
+    taxiRefreshInterval = 4,
+    sessionKnownTaxis = {},
+    taxiInjectedKey = nil,
+    taxiInjectedDest = nil,
+    taxiForceSimplifyTransitWaypoints = false,
 }
 
 -- NOTE:
@@ -556,15 +570,318 @@ local function IsPlayerOnTaxi()
     return UnitOnTaxi and UnitOnTaxi("player") and true or false
 end
 
+local function CloneWorldPoint(pt)
+    if not pt then return nil end
+    return {
+        maI = pt.maI,
+        wx = pt.wx,
+        wy = pt.wy,
+        zx = pt.zx,
+        zy = pt.zy,
+        mapName = pt.mapName,
+        continent = pt.continent,
+        instance = pt.instance,
+        instanceType = pt.instanceType,
+        zoneText = pt.zoneText,
+        subZoneText = pt.subZoneText,
+    }
+end
+
 local function GetRouteBuildStartPoint()
     local current = GetPlayerWorldPos()
-    if not current then return nil end
 
-    if IsPlayerOnTaxi() then
-        return CloneWorldPoint(STATE.lastGroundPlayerPos or STATE.lastNonTaxiPlayerPos or STATE.lastNonInstanceStablePlayerPos or current)
+    if IsPlayerOnTaxi() and current then
+        local airborne = CloneWorldPoint(current)
+        if airborne then
+            airborne.isSyntheticStart = true
+            airborne.label = airborne.label or "Taxi current"
+            return airborne
+        end
     end
 
+    if IsPlayerOnTaxi() and STATE.lastGroundPlayerPos then
+        local frozen = CloneWorldPoint(STATE.lastGroundPlayerPos)
+        if frozen then
+            frozen.isSyntheticStart = true
+            frozen.label = frozen.label or "Taxi origin"
+            return frozen
+        end
+    end
+
+    if not current then return nil end
     return current
+end
+
+local function dbg(msg)
+    if STATE.db and STATE.db.debug == true then
+        pr(msg)
+    end
+end
+
+CW.CleanupTransientTaxiDestinations = function(silent)
+    EnsureDb()
+    if not (STATE.db and type(STATE.db.destinations) == "table") then
+        STATE.taxiInjectedKey = nil
+        STATE.taxiInjectedDest = nil
+        return false
+    end
+
+    local removed = false
+    for i = #STATE.db.destinations, 1, -1 do
+        local dest = STATE.db.destinations[i]
+        if type(dest) == "table" and dest.cwTaxiInjected then
+            tremove(STATE.db.destinations, i)
+            removed = true
+        end
+    end
+
+    if removed then
+        STATE.taxiInjectedKey = nil
+        STATE.taxiInjectedDest = nil
+        InvalidateRoute("cleanup transient taxi destination")
+        if not silent and STATE.db.autoSyncToCarbonite then
+            SyncQueueToCarbonite()
+        end
+        dbg("taxi: cleaned up transient queue head")
+    else
+        STATE.taxiInjectedKey = nil
+        STATE.taxiInjectedDest = nil
+    end
+
+    return removed
+end
+
+CW.ResolveTaxiNodeByName = function(name, targetWx, targetWy)
+    if not (name and name ~= "" and Nx and Nx.Tra and type(Nx.Tra.Tra) == "table") then
+        return nil
+    end
+
+    local requestedKeys = CW.BuildTaxiKeyVariants(name)
+    local best = nil
+    local bestScore = nil
+
+    local function ConsiderCandidate(nod, displayName)
+        if type(nod) ~= "table" or not nod.LoN or not nod.MaI or not nod.WX or not nod.WY then
+            return
+        end
+
+        local candidateName = displayName or nod.LoN
+        local matched = false
+        for key in pairs(requestedKeys) do
+            if key and key ~= "" then
+                for nodeKey in pairs(CW.BuildTaxiKeyVariants(candidateName)) do
+                    if nodeKey == key then
+                        matched = true
+                        break
+                    end
+                end
+                if matched then break end
+            end
+        end
+
+        if not matched then
+            return
+        end
+
+        local distPenalty = 0
+        if targetWx and targetWy then
+            distPenalty =
+                math.abs((tonumber(nod.WX) or 0) - (tonumber(targetWx) or 0)) +
+                math.abs((tonumber(nod.WY) or 0) - (tonumber(targetWy) or 0))
+        end
+
+        if bestScore == nil or distPenalty < bestScore then
+            bestScore = distPenalty
+            best = {
+                maI = nod.MaI,
+                wx = nod.WX,
+                wy = nod.WY,
+                mapName = nod.LoN,
+                userName = candidateName,
+                userLabel = "taxi",
+                description = "Transient taxi destination",
+            }
+        end
+    end
+
+    for _, list in pairs(Nx.Tra.Tra) do
+        if type(list) == "table" then
+            for _, nod in ipairs(list) do
+                ConsiderCandidate(nod, nod.LoN)
+                ConsiderCandidate(nod, nod.Nam)
+            end
+        end
+    end
+
+    return best
+end
+
+CW.GetActiveTaxiDestination = function()
+    if not IsPlayerOnTaxi() then return nil, "not-on-taxi" end
+    local map = GetMap()
+    if not map then return nil, "no-map" end
+    if not (Nx and Nx.Map) then return nil, "no-carbonite" end
+
+    local taxiName = map.TaN
+    local wx = map.TaX
+    local wy = map.TaY
+    if not (taxiName and taxiName ~= "" and wx and wy) then
+        return nil, "no-active-taxi-target"
+    end
+
+    local dest = CW.ResolveTaxiNodeByName(taxiName, wx, wy) or {
+        mapName = taxiName,
+        userName = taxiName,
+        userLabel = "taxi",
+        description = "Transient taxi destination",
+    }
+
+    dest.wx = wx
+    dest.wy = wy
+    dest.ts = date("%Y-%m-%d %H:%M:%S")
+    dest.cwTaxiInjected = true
+
+    if not dest.maI then
+        return nil, "active-taxi-target-without-maI"
+    end
+
+    dest.mapName = dest.mapName or (map.ITN and map:ITN(dest.maI)) or taxiName
+    return dest, nil
+end
+
+CW.EnsureTaxiDestinationQueueHead = function()
+    EnsureDb()
+    if not (STATE.db and type(STATE.db.destinations) == "table") then return false end
+
+    local hasRealQueueStop = false
+    for _, queued in ipairs(STATE.db.destinations) do
+        if type(queued) == "table" and not queued.cwTaxiInjected then
+            hasRealQueueStop = true
+            break
+        end
+    end
+    if not hasRealQueueStop then
+        return false
+    end
+
+    local dest, why = CW.GetActiveTaxiDestination()
+    if not dest then
+        dbg("taxi: could not resolve active destination (" .. tostring(why) .. ")")
+        return false
+    end
+
+    local key = table.concat({ tostring(dest.maI or "?"), string.format("%.3f", tonumber(dest.wx) or -1), string.format("%.3f", tonumber(dest.wy) or -1), tostring(dest.userName or dest.mapName or "?") }, "|")
+    local first = STATE.db.destinations[1]
+
+    if type(first) == "table" and not first.cwTaxiInjected then
+        local firstKey = table.concat({ tostring(first.maI or "?"), string.format("%.3f", tonumber(first.wx) or -1), string.format("%.3f", tonumber(first.wy) or -1), tostring(first.userName or first.mapName or "?") }, "|")
+        if firstKey == key then
+            STATE.taxiInjectedKey = key
+            STATE.taxiInjectedDest = CloneWorldPoint(dest)
+            return false
+        end
+    end
+
+    if type(first) == "table" and first.cwTaxiInjected then
+        local existingKey = table.concat({ tostring(first.maI or "?"), string.format("%.3f", tonumber(first.wx) or -1), string.format("%.3f", tonumber(first.wy) or -1), tostring(first.userName or first.mapName or "?") }, "|")
+        if existingKey == key then
+            STATE.taxiInjectedKey = key
+            STATE.taxiInjectedDest = CloneWorldPoint(dest)
+            return false
+        end
+        tremove(STATE.db.destinations, 1)
+    else
+        CW.CleanupTransientTaxiDestinations(true)
+    end
+
+    tinsert(STATE.db.destinations, 1, dest)
+    STATE.taxiInjectedKey = key
+    STATE.taxiInjectedDest = CloneWorldPoint(dest)
+    InvalidateRoute("taxi destination queue head inserted")
+    if STATE.db.autoSyncToCarbonite then
+        SyncQueueToCarbonite()
+    end
+    dbg("taxi: inserted transient queue head => " .. tostring(dest.userName or dest.mapName or dest.maI))
+    return true
+end
+
+CW.RemoveTaxiDestinationQueueHead = function(syncAfter)
+    EnsureDb()
+    if not (STATE.db and type(STATE.db.destinations) == "table") then
+        STATE.taxiInjectedKey = nil
+        STATE.taxiInjectedDest = nil
+        return false
+    end
+
+    local first = STATE.db.destinations[1]
+    if not (type(first) == "table" and first.cwTaxiInjected) then
+        CW.CleanupTransientTaxiDestinations(true)
+        return false
+    end
+
+    tremove(STATE.db.destinations, 1)
+    STATE.taxiInjectedKey = nil
+    STATE.taxiInjectedDest = nil
+    InvalidateRoute("taxi destination queue head removed")
+    if syncAfter and STATE.db.autoSyncToCarbonite then
+        SyncQueueToCarbonite()
+    end
+    dbg("taxi: removed transient queue head")
+    return true
+end
+
+CW.EnterTaxiMicroRoutingOverride = function()
+    EnsureDb()
+    if not STATE.db then return end
+    if STATE.taxiForceSimplifyTransitWaypoints then return end
+
+    STATE.taxiMicroRoutingWasSimplified = STATE.db.simplifyTransitWaypoints and true or false
+    STATE.taxiForceSimplifyTransitWaypoints = true
+    STATE.taxiNextRefreshAt = 0
+
+    InvalidateRoute("taxi micro routing off")
+    RefreshUiHeader()
+    dbg("taxi: temporary micro routing disabled")
+end
+
+CW.LeaveTaxiMicroRoutingOverride = function()
+    EnsureDb()
+    if not STATE.db then return end
+    if not STATE.taxiForceSimplifyTransitWaypoints then
+        STATE.taxiMicroRoutingWasSimplified = nil
+        STATE.taxiNextRefreshAt = 0
+        return
+    end
+
+    STATE.taxiForceSimplifyTransitWaypoints = false
+    STATE.taxiMicroRoutingWasSimplified = nil
+    STATE.taxiNextRefreshAt = 0
+
+    InvalidateRoute("taxi micro routing restore")
+    RefreshUiHeader()
+    dbg("taxi: micro routing restored")
+end
+
+CW.TryTaxiPeriodicRefresh = function(now)
+    EnsureDb()
+    if not STATE.db or #(STATE.db.destinations or {}) == 0 then return end
+    now = tonumber(now) or 0
+
+    local interval = tonumber(STATE.taxiRefreshInterval) or 4
+    if interval < 2 then interval = 2 end
+
+    if now < (STATE.taxiNextRefreshAt or 0) then
+        return
+    end
+
+    STATE.taxiNextRefreshAt = now + interval
+    InvalidateRoute("taxi periodic refresh")
+
+    if STATE.db.autoSyncToCarbonite then
+        SyncQueueToCarbonite()
+    end
+
+    dbg("taxi: periodic route refresh")
 end
 
 local EDGE_COLORS = {
@@ -1203,24 +1520,6 @@ local function EnsureTransportDb()
     CompactLearnedTransports()
     return STATE.db.learnedTransports
 end
-
-local function CloneWorldPoint(pt)
-    if not pt then return nil end
-    return {
-        maI = pt.maI,
-        wx = pt.wx,
-        wy = pt.wy,
-        zx = pt.zx,
-        zy = pt.zy,
-        mapName = pt.mapName,
-        continent = pt.continent,
-        instance = pt.instance,
-        instanceType = pt.instanceType,
-        zoneText = pt.zoneText,
-        subZoneText = pt.subZoneText,
-    }
-end
-
 
 local function EscapePortableField(value)
     return gsub(tostring(value or ""), "|", "/")
@@ -1870,12 +2169,6 @@ local function SaveInstanceKnownLocation(fromPos, toPos)
         mapName = entrance.mapName,
         discoveredBy = "transport-discovery-instance",
     }
-end
-
-local function dbg(msg)
-    if STATE.db and STATE.db.debug == true then
-        pr(msg)
-    end
 end
 
 local function CloneKnownLocationDestination(loc)
@@ -3341,6 +3634,42 @@ local function RestoreKnownLocationsSelectionAfterDelete(previousIndex)
     ui.lastClickTime = nil
 end
 
+local function QueueKnownLocationsSearchFocus()
+    local ui = STATE.knownLocationsUi
+    if not ui then return end
+
+    local focusBox = ui.searchBox
+    if not focusBox or not focusBox.SetFocus then return end
+
+    local focusDriver = ui.focusDriver
+    if not focusDriver then
+        focusDriver = CreateFrame("Frame", nil, ui.frame)
+        ui.focusDriver = focusDriver
+    end
+
+    local remainingDelay = 0
+    focusDriver:SetScript("OnUpdate", function(self, elapsed)
+        remainingDelay = remainingDelay + (elapsed or 0)
+        if remainingDelay < 0.01 then
+            return
+        end
+
+        self:SetScript("OnUpdate", nil)
+
+        if not STATE.knownLocationsUi or not STATE.knownLocationsUi.frame or not STATE.knownLocationsUi.frame:IsShown() then
+            return
+        end
+
+        local searchBox = STATE.knownLocationsUi.searchBox
+        if searchBox and searchBox.SetFocus then
+            searchBox:SetFocus()
+            if searchBox.HighlightText then
+                searchBox:HighlightText()
+            end
+        end
+    end)
+end
+
 ShowKnownLocationsFrame = function()
     if STATE.knownLocationsUi and STATE.knownLocationsUi.frame then
         local f = STATE.knownLocationsUi.frame
@@ -3350,6 +3679,7 @@ ShowKnownLocationsFrame = function()
             ArmKeyboardModalFrame(f)
             RefreshKnownLocationsFrame()
             f:Show()
+            QueueKnownLocationsSearchFocus()
         end
         return
     end
@@ -3582,6 +3912,7 @@ ShowKnownLocationsFrame = function()
     RefreshKnownLocationsFrame()
     ArmKeyboardModalFrame(f)
     f:Show()
+    QueueKnownLocationsSearchFocus()
 end
 
 local function ShowTransportManagementFrame()
@@ -4253,6 +4584,14 @@ local function ResetDeathAutoRouteCycle()
     STATE.deathAutoRouteContext = nil
 end
 
+local function ClonePersistentInstanceContext(pt)
+    if not pt then return nil end
+    local copy = CloneWorldPoint(pt) or {}
+    copy.instance = true
+    copy.instanceType = copy.instanceType or "instance"
+    return copy
+end
+
 local function CaptureDeathInstanceContext()
     local pos = GetPlayerWorldPos()
     if pos and pos.instance then
@@ -4419,7 +4758,7 @@ local function InstallUndoRedoBindings()
             ClearCarboniteTargets()
         end
 
-        pr("queue cleared (Ctrl+Shift+C)")
+        dbg("queue cleared (Ctrl+Shift+C)")
         RefreshUiHeader()
     end)
 
@@ -4599,14 +4938,6 @@ end
 
 function ClearPendingDeathAutoRoute()
     STATE.pendingDeathAutoRoute = nil
-end
-
-local function ClonePersistentInstanceContext(pt)
-    if not pt then return nil end
-    local copy = CloneWorldPoint(pt) or {}
-    copy.instance = true
-    copy.instanceType = copy.instanceType or "instance"
-    return copy
 end
 
 function StartPendingDeathAutoRoute(delay, deathContext)
@@ -5457,7 +5788,9 @@ local function InjectKnownRouteEdges(addNode, addEdge, graph)
 
                     local routeKind = CanonicalTransportKind(InferStoredTransportKind(loc) or "route")
                     local isBidirectional = (loc.bidirectional == true) or routeKind == "flight_master"
-                    addEdge(n1, n2, GetKnownRouteHopCostSeconds(loc, a, b), routeKind, "Known route: " .. routeName, isBidirectional)
+                    addEdge(n1, n2, GetKnownRouteHopCostSeconds(loc, a, b), routeKind, "Known route: " .. routeName, isBidirectional, {
+                        routeTransportKind = routeKind,
+                    })
                     graph.links[#graph.links + 1] = { a = n1, b = n2, type = routeKind, knownRoute = true, bidirectional = isBidirectional }
                 end
             end
@@ -5604,7 +5937,7 @@ local function GetTargetTypeForRoutePoint(pt)
         return TARGET_TYPE_STRAIGHT
     end
 
-    if STATE.db and not STATE.db.simplifyTransitWaypoints then
+    if STATE.db and not IsTransitSimplifiedEffective() then
         return TARGET_TYPE_STRAIGHT
     end
 
@@ -5862,44 +6195,139 @@ local function NormalizeTaxiKey(name)
     name = tostring(name)
     name = gsub(name, "^%s+", "")
     name = gsub(name, "%s+$", "")
+    name = gsub(name, "[%(%)]", " ")
+    name = gsub(name, "[,:%-%./']", " ")
+    name = gsub(name, "%s+", " ")
+    name = gsub(name, "^%s+", "")
+    name = gsub(name, "%s+$", "")
     return lower(name)
 end
 
-local function BuildKnownTaxiLookup()
-    if not NxCData or type(NxCData["Taxi"]) ~= "table" then return {} end
+function CW.BuildTaxiKeyVariants(name)
     local out = {}
-    for taxiName, known in pairs(NxCData["Taxi"]) do
-        if known then
-            out[NormalizeTaxiKey(taxiName)] = taxiName
+    local function addVariant(v)
+        v = NormalizeTaxiKey(v)
+        if v and v ~= "" then
+            out[v] = true
         end
     end
+
+    addVariant(name)
+
+    local raw = tostring(name or "")
+    if raw ~= "" then
+        addVariant((gsub(raw, "%b()", " ")))
+        addVariant((gsub(raw, "%s+[Tt]he%s+.*$", "")))
+        addVariant((gsub(raw, "%s*[,%-:].*$", "")))
+    end
+
+    return out
+end
+
+function CW.MarkSessionKnownTaxi(name)
+    if not name or name == "" then return false end
+    STATE.sessionKnownTaxis = STATE.sessionKnownTaxis or {}
+
+    local changed = false
+    for key in pairs(CW.BuildTaxiKeyVariants(name)) do
+        if not STATE.sessionKnownTaxis[key] then
+            STATE.sessionKnownTaxis[key] = name
+            changed = true
+        end
+    end
+    return changed
+end
+
+function CW.RefreshSessionKnownTaxisFromTaxiMap()
+    if not NumTaxiNodes or not TaxiNodeName or not TaxiNodeGetType then
+        return false
+    end
+
+    local changedAny = false
+    local count = tonumber(NumTaxiNodes()) or 0
+    for i = 1, count do
+        local nodeType = TaxiNodeGetType(i)
+        if nodeType == "CURRENT" or nodeType == "REACHABLE" then
+            local taxiName = TaxiNodeName(i)
+            if taxiName and taxiName ~= "" and taxiName ~= "INVALID" then
+                if CW.MarkSessionKnownTaxi(taxiName) then
+                    changedAny = true
+                    dbg("session-known taxi added: " .. tostring(taxiName) .. " (" .. tostring(nodeType) .. ")")
+                end
+            end
+        end
+    end
+
+    return changedAny
+end
+
+local function BuildKnownTaxiLookup()
+    local out = {}
+
+    if NxCData and type(NxCData["Taxi"]) == "table" then
+        for taxiName, known in pairs(NxCData["Taxi"]) do
+            if known then
+                for key in pairs(CW.BuildTaxiKeyVariants(taxiName)) do
+                    out[key] = taxiName
+                end
+            end
+        end
+    end
+
+    if type(STATE.sessionKnownTaxis) == "table" then
+        for key, taxiName in pairs(STATE.sessionKnownTaxis) do
+            if key and taxiName and out[key] == nil then
+                out[key] = taxiName
+            end
+        end
+    end
+
     return out
 end
 
 local function BuildKnownTaxiNodes(map)
     if not (STATE.db and STATE.db.useFlightMasters) then return {} end
-    if STATE.db and STATE.db.simplifyTransitWaypoints then return {} end
+    if STATE.db and IsTransitSimplifiedEffective() then return {} end
     if not Nx or not Nx.Tra then
         return {}
     end
 
     local knownLookup = BuildKnownTaxiLookup()
+    if not next(knownLookup) then
+        return {}
+    end
 
     local out = {}
     local seen = {}
+    local rawCandidates = {}
 
-    local function pushTaxiAny(taxiName, npcName, maI, wx, wy)
-        local key = NormalizeTaxiKey(taxiName)
-        if not key or seen[key] then return end
-        if not knownLookup[key] then return end
+    local function FindKnownTaxiName(nameA, nameB)
+        for key in pairs(CW.BuildTaxiKeyVariants(nameA)) do
+            if knownLookup[key] then
+                return knownLookup[key], key
+            end
+        end
+        for key in pairs(CW.BuildTaxiKeyVariants(nameB)) do
+            if knownLookup[key] then
+                return knownLookup[key], key
+            end
+        end
+        return nil, nil
+    end
+
+    local function pushTaxiAny(taxiName, npcName, maI, wx, wy, knownTaxiName)
+        local canonicalName = knownTaxiName or taxiName
+        local canonicalKey = NormalizeTaxiKey(canonicalName)
+        if not canonicalKey or seen[canonicalKey] then return end
         if not (maI and wx and wy) then return end
+
         local ok, zx, zy = pcall(map.GZP, map, maI, wx, wy)
         if not (ok and zx and zy and zx >= 0 and zx <= 100 and zy >= 0 and zy <= 100) then return end
 
-        seen[key] = true
+        seen[canonicalKey] = true
         out[#out + 1] = {
-            taxiName = taxiName,
-            npcName = npcName or knownLookup[key] or taxiName,
+            taxiName = canonicalName,
+            npcName = npcName or canonicalName,
             maI = maI,
             wx = wx,
             wy = wy,
@@ -5913,32 +6341,65 @@ local function BuildKnownTaxiNodes(map)
             if type(list) == "table" then
                 for _, nod in ipairs(list) do
                     if type(nod) == "table" and nod.LoN and nod.MaI and nod.WX and nod.WY then
-                        pushTaxiAny(nod.LoN, nod.Nam or nod.LoN, nod.MaI, nod.WX, nod.WY)
+                        rawCandidates[#rawCandidates + 1] = {
+                            taxiName = nod.LoN,
+                            npcName = nod.Nam or nod.LoN,
+                            maI = nod.MaI,
+                            wx = nod.WX,
+                            wy = nod.WY,
+                        }
                     end
                 end
             end
         end
     end
 
-    if Nx.Map and Nx.Map.Gui and type(Nx.Map.Gui.FiT2) == "function" and next(knownLookup) then
-        for taxiKey, taxiName in pairs(knownLookup) do
-            if not seen[taxiKey] then
-                local npcName, wx, wy = Nx.Map.Gui:FiT2(taxiName)
+    for _, cand in ipairs(rawCandidates) do
+        local knownTaxiName = FindKnownTaxiName(cand.taxiName, cand.npcName)
+        if knownTaxiName then
+            pushTaxiAny(cand.taxiName, cand.npcName, cand.maI, cand.wx, cand.wy, knownTaxiName)
+        end
+    end
+
+    if Nx.Map and Nx.Map.Gui and type(Nx.Map.Gui.FiT2) == "function" then
+        for _, knownTaxiName in pairs(knownLookup) do
+            local canonicalKey = NormalizeTaxiKey(knownTaxiName)
+            if canonicalKey and not seen[canonicalKey] then
+                local npcName, wx, wy = Nx.Map.Gui:FiT2(knownTaxiName)
                 if wx and wy then
                     local bestMapId, bestDist2 = nil, nil
-                    for maI = 1, 5000 do
-                        local ok, zx, zy = pcall(map.GZP, map, maI, wx, wy)
-                        if ok and zx and zy and zx >= 0 and zx <= 100 and zy >= 0 and zy <= 100 then
-                            local dx = zx - 50
-                            local dy = zy - 50
-                            local dist2 = dx * dx + dy * dy
-                            if not bestDist2 or dist2 < bestDist2 then
-                                bestMapId, bestDist2 = maI, dist2
+
+                    for _, cand in ipairs(rawCandidates) do
+                        local matchedName = FindKnownTaxiName(cand.taxiName, cand.npcName)
+                        if matchedName == knownTaxiName and cand.maI then
+                            local ok, zx, zy = pcall(map.GZP, map, cand.maI, wx, wy)
+                            if ok and zx and zy and zx >= 0 and zx <= 100 and zy >= 0 and zy <= 100 then
+                                local dx = zx - 50
+                                local dy = zy - 50
+                                local dist2 = dx * dx + dy * dy
+                                if not bestDist2 or dist2 < bestDist2 then
+                                    bestMapId, bestDist2 = cand.maI, dist2
+                                end
                             end
                         end
                     end
+
+                    if not bestMapId then
+                        for maI = 1, 5000 do
+                            local ok, zx, zy = pcall(map.GZP, map, maI, wx, wy)
+                            if ok and zx and zy and zx >= 0 and zx <= 100 and zy >= 0 and zy <= 100 then
+                                local dx = zx - 50
+                                local dy = zy - 50
+                                local dist2 = dx * dx + dy * dy
+                                if not bestDist2 or dist2 < bestDist2 then
+                                    bestMapId, bestDist2 = maI, dist2
+                                end
+                            end
+                        end
+                    end
+
                     if bestMapId then
-                        pushTaxiAny(taxiName, npcName or taxiName, bestMapId, wx, wy)
+                        pushTaxiAny(knownTaxiName, npcName or knownTaxiName, bestMapId, wx, wy, knownTaxiName)
                     end
                 end
             end
@@ -6000,6 +6461,7 @@ local function EnsureGraph()
             type = edgeType,
             label = label,
             learnedHop = opts.learnedHop,
+            routeTransportKind = opts.routeTransportKind,
         })
         graph.edgeCount = graph.edgeCount + 1
         if bidirectional then
@@ -6009,6 +6471,7 @@ local function EnsureGraph()
                 type = edgeType,
                 label = label,
                 learnedHop = opts.learnedHop,
+                routeTransportKind = opts.routeTransportKind,
             })
             graph.edgeCount = graph.edgeCount + 1
         end
@@ -6071,24 +6534,14 @@ local function EnsureGraph()
             taxiNodeIds[#taxiNodeIds + 1] = { id = nodeId, taxiName = taxi.taxiName, npcName = taxi.npcName, maI = taxi.maI, wx = taxi.wx, wy = taxi.wy }
         end
 
-        local taxiKnown = BuildKnownTaxiLookup()
-        local anyTaxiKnown = next(taxiKnown) and true or false
         for i = 1, #taxiNodeIds do
             local a = taxiNodeIds[i]
             for j = i + 1, #taxiNodeIds do
                 local b = taxiNodeIds[j]
-                if anyTaxiKnown then
-                    local ka = NormalizeTaxiKey(a.taxiName)
-                    local kb = NormalizeTaxiKey(b.taxiName)
-                    if not (ka and kb and (taxiKnown[ka] or taxiKnown[kb])) then
-                        -- skip TFCT: avoids O(n^2) UI hitch; edges still added when one end is known
-                    else
-                        local ok, directCost = pcall(Nx.Tra.TFCT, Nx.Tra, a.taxiName, b.taxiName)
-                        if ok and directCost and directCost > 0 then
-                            addEdge(a.id, b.id, TransportCostSeconds("flight_master", a.wx, a.wy, b.wx, b.wy), "flight_master", format("Flight Master: %s -> %s", tostring(a.taxiName), tostring(b.taxiName)), true)
-                            graph.links[#graph.links + 1] = {a = a.id, b = b.id, type = "flight_master"}
-                        end
-                    end
+                local ok, directCost = pcall(Nx.Tra.TFCT, Nx.Tra, a.taxiName, b.taxiName)
+                if ok and directCost and directCost > 0 then
+                    addEdge(a.id, b.id, TransportCostSeconds("flight_master", a.wx, a.wy, b.wx, b.wy), "flight_master", format("Flight Master: %s -> %s", tostring(a.taxiName), tostring(b.taxiName)), true)
+                    graph.links[#graph.links + 1] = {a = a.id, b = b.id, type = "flight_master"}
                 end
             end
         end
@@ -6320,35 +6773,67 @@ local function CollapseDeepTaxiChains(points)
         return copy
     end
 
+    local function IsFlightMasterRoutePoint(pt)
+        if not pt then return false end
+        local kind = CanonicalTransportKind(pt.transportKind or pt.edgeType)
+        return kind == "flight_master"
+    end
+
+    local function IsMinorFlightMasterConnector(pt)
+        if not pt then return false end
+        if pt.edgeType ~= "walk-to-transport" then return false end
+        local cost = tonumber(pt.cost) or huge
+        return cost <= 3
+    end
+
     while i <= #points do
         local pt = points[i]
 
-        if pt and (pt.edgeType == "taxi" or pt.edgeType == "flight_master") then
+        if IsFlightMasterRoutePoint(pt) then
             local chainStart = i
             local chainEnd = i
             local totalTaxiCost = tonumber(pt.cost) or 0
+            local lastFlightIndex = i
 
-            while chainEnd + 1 <= #points and points[chainEnd + 1] and (points[chainEnd + 1].edgeType == "taxi" or points[chainEnd + 1].edgeType == "flight_master") do
-                chainEnd = chainEnd + 1
-                totalTaxiCost = totalTaxiCost + (tonumber(points[chainEnd].cost) or 0)
+            while chainEnd < #points do
+                local nextPt = points[chainEnd + 1]
+                if IsFlightMasterRoutePoint(nextPt) then
+                    chainEnd = chainEnd + 1
+                    lastFlightIndex = chainEnd
+                    totalTaxiCost = totalTaxiCost + (tonumber(nextPt.cost) or 0)
+                elseif IsMinorFlightMasterConnector(nextPt) and chainEnd + 2 <= #points and IsFlightMasterRoutePoint(points[chainEnd + 2]) then
+                    chainEnd = chainEnd + 1
+                    totalTaxiCost = totalTaxiCost + (tonumber(nextPt.cost) or 0)
+                else
+                    break
+                end
             end
 
-            if chainEnd > chainStart then
-                local lastTaxiPoint = points[chainEnd]
+            if lastFlightIndex > chainStart then
+                local firstTaxiPoint = points[chainStart]
+                local lastTaxiPoint = points[lastFlightIndex]
                 local collapsed = ClonePoint(lastTaxiPoint)
 
+                collapsed.edgeType = "flight_master"
+                collapsed.transportKind = "flight_master"
                 collapsed.cost = totalTaxiCost
+                collapsed.transportChainStart = chainStart
+                collapsed.transportChainEnd = lastFlightIndex
+                collapsed.collapsedMinorConnector = true
 
-                local fromName = pt.mapName or pt.label or tostring(pt.maI or "?")
-                local toName = lastTaxiPoint.mapName or lastTaxiPoint.label or tostring(lastTaxiPoint.maI or "?")
+                local fromName = firstTaxiPoint.label or firstTaxiPoint.mapName or tostring(firstTaxiPoint.maI or "?")
+                local toName = lastTaxiPoint.label or lastTaxiPoint.mapName or tostring(lastTaxiPoint.maI or "?")
                 collapsed.label = "Flight Master: " .. tostring(fromName) .. " -> " .. tostring(toName)
 
                 out[#out + 1] = collapsed
+                i = chainEnd + 1
             else
-                out[#out + 1] = ClonePoint(pt)
+                local single = ClonePoint(pt)
+                single.edgeType = "flight_master"
+                single.transportKind = "flight_master"
+                out[#out + 1] = single
+                i = i + 1
             end
-
-            i = chainEnd + 1
         else
             out[#out + 1] = ClonePoint(pt)
             i = i + 1
@@ -6377,6 +6862,7 @@ local function BuildTransportLeg(startPoint, destPoint)
                     type = e.type,
                     label = e.label,
                     learnedHop = e.learnedHop,
+                    routeTransportKind = e.routeTransportKind,
                 }
             end
             nodes[id] = {
@@ -6578,13 +7064,14 @@ local function BuildTransportLeg(startPoint, destPoint)
             zy = zy,
             mapName = map.ITN and map:ITN(n.maI) or ("Map " .. tostring(n.maI)),
             edgeType = edge and edge.type or "start",
+            transportKind = edge and (edge.routeTransportKind or edge.type) or nil,
             label = edge and edge.label or n.label or n.type,
             cost = edge and edge.cost or 0,
         })
     end
 
     if STATE.db and STATE.db.simplifyTransitWaypoints then
-        route.points = CollapseMinimalTransitNoise(route.points)
+        route.points = CollapseMinimalTransitNoise(CollapseDeepTaxiChains(route.points))
     else
         route.points = CollapseDeepTaxiChains(route.points)
     end
@@ -6627,6 +7114,192 @@ local function BuildDirectFallbackLeg(startPoint, destPoint, why, crossContinent
     }
 end
 
+
+
+function ResolveMapIdByName(name)
+    local map = GetMap()
+    if not (map and name and map.ITN) then return nil end
+    local target = tostring(name):lower()
+    for maI = 1, 5000 do
+        local mapName = map:ITN(maI)
+        if mapName and tostring(mapName):lower() == target then
+            return maI
+        end
+    end
+    return nil
+end
+
+function BuildPointFromAnchor(maI, zx, zy, label, edgeType)
+    local map = GetMap()
+    if not (map and maI and zx and zy) then return nil end
+    local wx, wy = map:GWP(maI, zx, zy)
+    if not (wx and wy) then return nil end
+    return {
+        maI = maI,
+        wx = wx,
+        wy = wy,
+        zx = zx,
+        zy = zy,
+        mapName = map.ITN and map:ITN(maI) or ("Map " .. tostring(maI)),
+        edgeType = edgeType or "connector",
+        label = label,
+        forceStraight = true,
+    }
+end
+
+function ResolveSouthKalimdorFallbackIds()
+    local tanarisMaI = ResolveMapIdByName("Tanaris")
+    local ungoroMaI = ResolveMapIdByName("Un'Goro Crater")
+    local silithusMaI = ResolveMapIdByName("Silithus")
+    local thousandNeedlesMaI = ResolveMapIdByName("Thousand Needles")
+    if not tanarisMaI or not ungoroMaI or not thousandNeedlesMaI then
+        return nil
+    end
+    return {
+        tanaris = {
+            maI = tanarisMaI,
+            north = { zx = 50.0, zy = 26.0, label = "Forced Kalimdor south connector: Tanaris north" },
+            south = { zx = 27.0, zy = 57.0, label = "Forced Kalimdor south connector: Tanaris south" },
+        },
+        ungoro = {
+            maI = ungoroMaI,
+            west = { zx = 30.0, zy = 24.0, label = "Forced Kalimdor south connector: Un'Goro west" },
+        },
+        silithus = silithusMaI and { maI = silithusMaI } or nil,
+        thousand_needles = {
+            maI = thousandNeedlesMaI,
+            gate = { zx = 33.0, zy = 13.0, label = "Forced Kalimdor south connector: Thousand Needles" },
+        },
+    }
+end
+
+function BuildPointFromResolvedAnchor(resolved, regionKey, pointKey, edgeType)
+    if not (resolved and resolved[regionKey] and resolved[regionKey][pointKey]) then
+        return nil
+    end
+    local region = resolved[regionKey]
+    local point = region[pointKey]
+    return BuildPointFromAnchor(region.maI, point.zx, point.zy, point.label, edgeType or "connector")
+end
+
+function BuildSouthKalimdorFallbackLeg(startPoint, destPoint, why)
+    if not (startPoint and destPoint and startPoint.wx and startPoint.wy and destPoint.wx and destPoint.wy) then
+        return nil
+    end
+
+    local resolved = ResolveSouthKalimdorFallbackIds()
+    if not resolved then
+        return nil
+    end
+
+    local tanarisMaI = resolved.tanaris and resolved.tanaris.maI
+    local ungoroMaI = resolved.ungoro and resolved.ungoro.maI
+    local silithusMaI = resolved.silithus and resolved.silithus.maI
+    local startMaI = tonumber(startPoint.maI)
+    local destMaI = tonumber(destPoint.maI)
+
+    if destMaI ~= tanarisMaI and destMaI ~= ungoroMaI and (not silithusMaI or destMaI ~= silithusMaI) then
+        return nil
+    end
+
+    local routePoints = {
+        {
+            maI = startPoint.maI,
+            wx = startPoint.wx,
+            wy = startPoint.wy,
+            zx = startPoint.zx,
+            zy = startPoint.zy,
+            mapName = startPoint.mapName,
+            edgeType = "start",
+            label = "Start",
+            cost = 0,
+        }
+    }
+
+    local anchors = {}
+    local function addResolved(regionKey, pointKey)
+        local pt = BuildPointFromResolvedAnchor(resolved, regionKey, pointKey, "connector")
+        if not pt then return end
+        local prev = anchors[#anchors]
+        if prev and prev.maI == pt.maI and math.abs((prev.zx or 0) - (pt.zx or 0)) < 0.01 and math.abs((prev.zy or 0) - (pt.zy or 0)) < 0.01 then
+            return
+        end
+        anchors[#anchors + 1] = pt
+    end
+
+    if startMaI ~= tanarisMaI and startMaI ~= ungoroMaI and (not silithusMaI or startMaI ~= silithusMaI) then
+        addResolved("thousand_needles", "gate")
+        addResolved("tanaris", "north")
+        if destMaI == ungoroMaI or (silithusMaI and destMaI == silithusMaI) then
+            addResolved("tanaris", "south")
+        end
+        if silithusMaI and destMaI == silithusMaI then
+            addResolved("ungoro", "west")
+        end
+    elseif startMaI == tanarisMaI then
+        if destMaI == ungoroMaI then
+            addResolved("tanaris", "south")
+        elseif silithusMaI and destMaI == silithusMaI then
+            addResolved("tanaris", "south")
+            addResolved("ungoro", "west")
+        end
+    elseif startMaI == ungoroMaI then
+        if destMaI == tanarisMaI then
+            addResolved("tanaris", "north")
+        elseif silithusMaI and destMaI == silithusMaI then
+            addResolved("ungoro", "west")
+        end
+    elseif silithusMaI and startMaI == silithusMaI then
+        if destMaI == ungoroMaI then
+            addResolved("ungoro", "west")
+        elseif destMaI == tanarisMaI then
+            addResolved("ungoro", "west")
+            addResolved("tanaris", "north")
+        end
+    end
+
+    local totalCost = 0
+    local previous = routePoints[1]
+    local added = 0
+    for _, pt in ipairs(anchors) do
+        if pt and previous.wx and previous.wy and pt.wx and pt.wy then
+            pt.cost = WalkCostSeconds(previous.wx, previous.wy, pt.wx, pt.wy)
+            totalCost = totalCost + (pt.cost or 0)
+            routePoints[#routePoints + 1] = pt
+            previous = pt
+            added = added + 1
+        end
+    end
+
+    if added <= 0 then
+        return nil
+    end
+
+    local finalPoint = {
+        maI = destPoint.maI,
+        wx = destPoint.wx,
+        wy = destPoint.wy,
+        zx = destPoint.zx,
+        zy = destPoint.zy,
+        mapName = destPoint.mapName,
+        edgeType = "walk",
+        label = "Forced Kalimdor south destination",
+        forceStraight = true,
+    }
+    finalPoint.cost = WalkCostSeconds(previous.wx, previous.wy, finalPoint.wx, finalPoint.wy)
+    totalCost = totalCost + (finalPoint.cost or 0)
+    routePoints[#routePoints + 1] = finalPoint
+
+    dbg("using forced Kalimdor south fallback chain: " .. tostring(why))
+    return {
+        totalCost = totalCost,
+        explored = 1 + added,
+        fallbackDirect = true,
+        forcedSouthKalimdor = true,
+        points = routePoints,
+    }
+end
+
 local function BuildRouteLeg(startPoint, destPoint)
     if not startPoint or not destPoint then
         return nil, "missing-leg-endpoint"
@@ -6635,11 +7308,14 @@ local function BuildRouteLeg(startPoint, destPoint)
     local map = GetMap()
     if not map then return nil, "no-map" end
 
-    if startPoint.maI == destPoint.maI then
-        local directCost = WalkCostSeconds(startPoint.wx, startPoint.wy, destPoint.wx, destPoint.wy)
+    local directCost = WalkCostSeconds(startPoint.wx, startPoint.wy, destPoint.wx, destPoint.wy)
+    if IsPlayerOnTaxi() and destPoint and destPoint.cwTaxiInjected then
+        local directTaxiCost = WalkCostSeconds(startPoint.wx, startPoint.wy, destPoint.wx, destPoint.wy)
         return {
-            totalCost = directCost,
+            totalCost = directTaxiCost,
             explored = 1,
+            fallbackDirect = true,
+            activeTaxiLeg = true,
             points = {
                 {
                     maI = startPoint.maI,
@@ -6659,37 +7335,17 @@ local function BuildRouteLeg(startPoint, destPoint)
                     zx = destPoint.zx,
                     zy = destPoint.zy,
                     mapName = destPoint.mapName,
-                    edgeType = "walk",
-                    label = "Walk",
-                    cost = directCost,
+                    edgeType = "flight_master",
+                    transportKind = "flight_master",
+                    label = destPoint.userName or destPoint.mapName or "Taxi destination",
+                    cost = directTaxiCost,
+                    forceStraight = true,
                 }
             },
         }
     end
 
-    if STATE.db and STATE.db.useIntercontinentalRouting then
-        local route, why = BuildTransportLeg(startPoint, destPoint)
-        if route then
-            return route
-        end
-
-        local startCont = startPoint.continent or nil
-        local destCont = destPoint.continent or nil
-        local crossContinent = startCont and destCont and startCont ~= destCont
-
-        if crossContinent then
-            return BuildDirectFallbackLeg(startPoint, destPoint, why, true)
-        end
-
-        if STATE.db and not STATE.db.simplifyTransitWaypoints then
-            return nil, "deep-graph-failed:" .. tostring(why)
-        end
-
-        dbg("graph leg fallback to direct walk: " .. tostring(why))
-    end
-
-    local directCost = WalkCostSeconds(startPoint.wx, startPoint.wy, destPoint.wx, destPoint.wy)
-    return {
+    local directLeg = {
         totalCost = directCost,
         explored = 1,
         fallbackDirect = startPoint.maI ~= destPoint.maI,
@@ -6719,6 +7375,43 @@ local function BuildRouteLeg(startPoint, destPoint)
             }
         },
     }
+
+    if STATE.db and STATE.db.useIntercontinentalRouting then
+        local route, why = BuildTransportLeg(startPoint, destPoint)
+        if route then
+            -- Same-map legs must still be allowed to use FM/transport when cheaper.
+            if startPoint.maI == destPoint.maI then
+                local routeCost = tonumber(route.totalCost) or huge
+                if route.transportUsed and routeCost <= directCost + 10 then
+                    return route
+                end
+                return directLeg
+            end
+
+            return route
+        end
+
+        local startCont = startPoint.continent or nil
+        local destCont = destPoint.continent or nil
+        local crossContinent = startCont and destCont and startCont ~= destCont
+
+        if crossContinent then
+            return BuildDirectFallbackLeg(startPoint, destPoint, why, true)
+        end
+
+        local forcedSouthKalimdor = BuildSouthKalimdorFallbackLeg(startPoint, destPoint, why)
+        if forcedSouthKalimdor then
+            return forcedSouthKalimdor
+        end
+
+        if STATE.db and not STATE.db.simplifyTransitWaypoints then
+            dbg("deep graph fallback to direct destination: " .. tostring(why))
+        else
+            dbg("graph leg fallback to direct walk: " .. tostring(why))
+        end
+    end
+
+    return directLeg
 end
 
 local function BuildExpandedRoute()
@@ -6750,7 +7443,10 @@ local function BuildExpandedRoute()
         route.explored = route.explored + (leg.explored or 0)
 
         for i, pt in ipairs(leg.points or {}) do
-            if not (q > 1 and i == 1) then
+            local skipStart = (q > 1 and i == 1)
+            local skipSyntheticStart = (q == 1 and i == 1 and current and current.isSyntheticStart)
+
+            if not skipStart and not skipSyntheticStart then
                 local copy = {}
                 for k, v in pairs(pt) do
                     copy[k] = v
@@ -6798,7 +7494,7 @@ end
 
 local function ShouldKeepRoutePointForSync(routePoints, idx)
     local pt = routePoints[idx]
-    if not pt or pt.edgeType == "start" then return false end
+    if not pt or pt.edgeType == "start" or pt.isSyntheticStart then return false end
 
     local prev = routePoints[idx - 1]
     local nextPt = routePoints[idx + 1]
@@ -7625,7 +8321,6 @@ local function HookCarboniteClear()
 
         wipe(STATE.db.destinations)
         InvalidateRoute("Carbonite clear")
-        pr("queue cleared (Carbonite Goto / targets were cleared in-game)")
         dbg("queue cleared because Carbonite ClT1 cleared active targets")
     end)
 
@@ -7668,11 +8363,94 @@ local function ExportWaypoints()
     pr(format("export: %d waypoint(s) in block (%d data lines). Select all in CW log, copy, paste into Import.", n, n))
 end
 
+function CW.DebugFlightMaster(name)
+    pr("---- FM DEBUG START ----")
+
+    if not name or name == "" then
+        pr("usage: /cw debugfm <name>")
+        return
+    end
+
+    local function norm(n)
+        if not n then return nil end
+        n = tostring(n)
+        n = gsub(n, "^%s+", "")
+        n = gsub(n, "%s+$", "")
+        return lower(n)
+    end
+
+    local inputNorm = norm(name)
+    pr("input=" .. tostring(name))
+    pr("inputNorm=" .. tostring(inputNorm))
+
+    local foundTaxi = false
+    if NxCData and type(NxCData["Taxi"]) == "table" then
+        for k, v in pairs(NxCData["Taxi"]) do
+            if v then
+                local nk = norm(k)
+                if nk == inputNorm then
+                    pr("NxCData exact known match: " .. tostring(k))
+                    foundTaxi = true
+                elseif nk and inputNorm and string.find(nk, inputNorm, 1, true) then
+                    pr("NxCData partial known match: " .. tostring(k))
+                end
+            end
+        end
+    else
+        pr("NxCData Taxi table unavailable")
+    end
+
+    if not foundTaxi then
+        pr("NxCData exact known match: none")
+    end
+
+    local foundNode = false
+    if Nx and Nx.Tra and type(Nx.Tra.Tra) == "table" then
+        for _, list in pairs(Nx.Tra.Tra) do
+            if type(list) == "table" then
+                for _, nod in ipairs(list) do
+                    if type(nod) == "table" and nod.LoN then
+                        local nk = norm(nod.LoN)
+                        if nk == inputNorm then
+                            pr("Nx.Tra exact node: " .. tostring(nod.LoN) .. " maI=" .. tostring(nod.MaI) .. " wx=" .. tostring(nod.WX) .. " wy=" .. tostring(nod.WY))
+                            foundNode = true
+                        elseif nk and inputNorm and string.find(nk, inputNorm, 1, true) then
+                            pr("Nx.Tra partial node: " .. tostring(nod.LoN))
+                        end
+                    end
+                end
+            end
+        end
+    else
+        pr("Nx.Tra.Tra unavailable")
+    end
+
+    if not foundNode then
+        pr("Nx.Tra exact node: none")
+    end
+
+    if Nx and Nx.Map and Nx.Map.Gui and type(Nx.Map.Gui.FiT2) == "function" then
+        local npcName, wx, wy = Nx.Map.Gui:FiT2(name)
+        pr("FiT2 => npcName=" .. tostring(npcName) .. " wx=" .. tostring(wx) .. " wy=" .. tostring(wy))
+    else
+        pr("FiT2 unavailable")
+    end
+
+    pr("---- FM DEBUG END ----")
+end
+
 SlashHandler = function(msg)
-    msg = string.lower((msg or ""):gsub("^%s+", ""):gsub("%s+$", ""))
+    local rawMsg = (msg or ""):gsub("^%s+", ""):gsub("%s+$", "")
+    local debugFmArg = rawMsg:match("^[Dd][Ee][Bb][Uu][Gg][Ff][Mm]%s+(.+)$")
+    if debugFmArg then
+        CW.DebugFlightMaster(debugFmArg)
+        return
+    end
+
+    msg = string.lower(rawMsg)
 
     if msg == "" or msg == "help" then
-        pr("commands: /cw ui | tuning | options | help | probe | add | list | export | import | sync | route | graph | clear | pop | undo | redo | autosync | autoadvance | autodiscovery | hasflying | flightmasters | deep | minimal | debug | simplify | legend | transports | cleartransports | transportlog | transportconfirmation | managetransports | saveroute | savehere")
+        pr("commands: /cw ui | tuning | options | help | probe | add | list | export | import | sync | route | graph | clear | pop | undo | redo | autosync | autoadvance | autodiscovery | hasflying | flightmasters | deep | minimal | debug | debugfm <name> | simplify | legend | transports | cleartransports | transportlog | transportconfirmation | managetransports | saveroute | savehere")
         return
     elseif msg == "ui" or msg == "panel" or msg == "window" then
         EnsureUi()
@@ -7830,6 +8608,7 @@ end
 local function OnEvent(_, event)
     if event == "PLAYER_LOGIN" then
         EnsureDb()
+        CW.CleanupTransientTaxiDestinations(true)
         HookMapClicks()
         HookCarboniteClear()
         InstallCarboniteTravelHook()
@@ -7844,6 +8623,7 @@ local function OnEvent(_, event)
         dbg("loaded (Phase 5B patched: UI/options/bindings + safer deep fallback + SCL guard)")
     elseif event == "PLAYER_ENTERING_WORLD" then
         EnsureDb()
+        CW.CleanupTransientTaxiDestinations(true)
         HookMapClicks()
         HookCarboniteClear()
         InstallCarboniteTravelHook()
@@ -7893,6 +8673,15 @@ local function OnEvent(_, event)
                 BeginPendingTransport(event, eventFrom)
             end
         end
+    elseif event == "TAXIMAP_OPENED" then
+        EnsureDb()
+        if CW.RefreshSessionKnownTaxisFromTaxiMap() then
+            STATE.graph = nil
+            InvalidateRoute("taxi map opened: refreshed session-known taxis")
+            if STATE.db and STATE.db.autoSyncToCarbonite and #(STATE.db.destinations or {}) > 0 then
+                SyncQueueToCarbonite()
+            end
+        end
     elseif event == "PLAYER_DEAD" then
         EnsureDb()
         ResetDeathAutoRouteCycle()
@@ -7923,14 +8712,43 @@ local function OnUpdate(_, elapsed)
 
     local onTaxi = IsPlayerOnTaxi()
     local current = GetPlayerWorldPos()
+    local now = GetTime and GetTime() or 0
+
+    if onTaxi then
+        CW.EnterTaxiMicroRoutingOverride()
+        CW.EnsureTaxiDestinationQueueHead()
+        if STATE.db and #(STATE.db.destinations or {}) > 0 then
+            STATE.pendingTaxiRouteRefresh = true
+            CW.TryTaxiPeriodicRefresh(now)
+        end
+    end
+
+    -- === POSITION TRACKING ===
+    if current and (current.maI or (current.wx and current.wy)) then
+        STATE.lastStablePlayerPos = CloneWorldPoint(current)
+
+        -- Freeze the ground anchor while on taxi so route planning stays stable in flight.
+        if not onTaxi then
+            STATE.lastGroundPlayerPos = CloneWorldPoint(current)
+        end
+
+        if current.instance then
+            STATE.lastInstanceStablePlayerPos = CloneWorldPoint(current)
+            RememberPersistentInstanceContext(current)
+        else
+            STATE.lastNonInstanceStablePlayerPos = CloneWorldPoint(current)
+        end
+    end
 
     -- === TAXI STATE TRANSITIONS ===
     if onTaxi then
         STATE.wasOnTaxi = true
     elseif STATE.wasOnTaxi then
         STATE.wasOnTaxi = false
+        CW.LeaveTaxiMicroRoutingOverride()
+        CW.RemoveTaxiDestinationQueueHead(false)
 
-        if STATE.pendingTaxiRouteRefresh then
+        if STATE.pendingTaxiRouteRefresh and current and (current.maI or (current.wx and current.wy)) then
             STATE.pendingTaxiRouteRefresh = false
             EnsureDb()
 
@@ -7944,7 +8762,7 @@ local function OnUpdate(_, elapsed)
             local eventFrom = STATE.lastStablePlayerPos
             local eventCurrent = current
 
-            if eventCurrent and eventCurrent.instance and eventFrom and eventFrom.instance and STATE.lastNonInstanceStablePlayerPos then
+            if eventCurrent and eventFrom and eventFrom.instance and STATE.lastNonInstanceStablePlayerPos then
                 eventFrom = STATE.lastNonInstanceStablePlayerPos
             end
 
@@ -7952,25 +8770,11 @@ local function OnUpdate(_, elapsed)
                 BeginPendingTransport("TAXI_ENDED", eventFrom)
             end
 
-            dbg("taxi ended: deferred zone-change autoroute resumed")
+            dbg("taxi ended: deferred route refresh resumed")
         end
-    end
-
-    -- === POSITION TRACKING ===
-    if current and (current.maI or (current.wx and current.wy)) then
-        STATE.lastStablePlayerPos = CloneWorldPoint(current)
-
-        -- 🔥 CRITICAL: freeze ground anchor while on taxi
-        if not onTaxi then
-            STATE.lastGroundPlayerPos = CloneWorldPoint(current)
-        end
-
-        if current.instance then
-            STATE.lastInstanceStablePlayerPos = CloneWorldPoint(current)
-            RememberPersistentInstanceContext(current)
-        else
-            STATE.lastNonInstanceStablePlayerPos = CloneWorldPoint(current)
-        end
+    elseif not onTaxi then
+        CW.LeaveTaxiMicroRoutingOverride()
+        CW.RemoveTaxiDestinationQueueHead(false)
     end
 
     -- === HOOKS (unchanged) ===
@@ -8003,6 +8807,7 @@ frame:RegisterEvent("PLAYER_ENTERING_WORLD")
 frame:RegisterEvent("ZONE_CHANGED")
 frame:RegisterEvent("ZONE_CHANGED_NEW_AREA")
 frame:RegisterEvent("ZONE_CHANGED_INDOORS")
+frame:RegisterEvent("TAXIMAP_OPENED")
 frame:RegisterEvent("PLAYER_DEAD")
 frame:RegisterEvent("PLAYER_ALIVE")
 frame:RegisterEvent("PLAYER_UNGHOST")

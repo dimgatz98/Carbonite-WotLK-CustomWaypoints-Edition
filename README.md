@@ -84,8 +84,6 @@ This repo bundles a **Wrath-era (3.3.5a)** Carbonite tree with **CustomWaypoints
 
 ---
 
-## Commands
-
 ## Routing Modes
 
 ### Minimal Mode (Stable)
@@ -98,8 +96,9 @@ This repo bundles a **Wrath-era (3.3.5a)** Carbonite tree with **CustomWaypoints
 
 > ⚠️ Note: There may be stuttering when the addon is used alongside Questie.
 
+> ⚠️ Note: Routes shown while flying with Flight Master may not be reliable. User experience is prioritized at this point.
 
-### Map Data Collection
+## Map Data Collection
 CustomWaypoints isn’t just about routing — it’s also an ongoing effort to build a reliable, community-driven dataset of map knowledge across WotLK.
 
 Many areas in 3.3.5a (especially instances, transports, and edge-case transitions) are incomplete or inconsistent. The goal is to gradually record, validate, and refine real in-game paths and connections through actual gameplay, creating a high-quality routing layer that goes beyond static data.
@@ -107,6 +106,9 @@ Many areas in 3.3.5a (especially instances, transports, and edge-case transition
 Every route, portal, or edge discovered adds value — and this is something that scales best with community input.
 
 If you’d like to contribute or just explore what’s already been collected, you can check the current dataset here:
+
 ➡️ [CustomWaypoints/data/known_routes_export.txt](CustomWaypoints/data/known_routes_export.txt)
 
 Even small additions (a dungeon entrance, a working transport, a corrected path) help improve routing for everyone.
+
+>⚠️ Note: If you import this data in your addon right now, during routing you may get Flight Master paths you have not yet discovered.
