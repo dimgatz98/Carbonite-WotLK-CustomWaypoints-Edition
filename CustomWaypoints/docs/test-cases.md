@@ -37,7 +37,7 @@ Run these after touching **capture**, **queue**, **sync**, **routing**, **import
 
 - Export → copy **full** log block → Import → queue matches **`/cw list`**.  
 - Single-line **`/cw import …`** works.  
-- Paste with **`CWPhase5B:`** noise still parses when normalization applies.  
+- Paste with **`CW:`** noise still parses when normalization applies.  
 - Bad row → **`import: rejected (reason): …`** — save that line for bug reports.
 
 ## Undo / redo

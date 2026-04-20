@@ -250,8 +250,8 @@ local function AppendUiLogLine(line)
 end
 
 local function pr(msg)
-    local line = "CWPhase5B: " .. tostring(msg)
-    DEFAULT_CHAT_FRAME:AddMessage("|cff80ff80CWPhase5B:|r " .. tostring(msg))
+    local line = "CW: " .. tostring(msg)
+    DEFAULT_CHAT_FRAME:AddMessage("|cff80ff80CW:|r " .. tostring(msg))
     AppendUiLogLine(line)
 end
 
@@ -2603,10 +2603,29 @@ end
 
 
 local CW_ESC_OVERRIDE_BUTTON_NAME = "CustomWaypointsEscOverrideButton"
+local CW_DELETE_OVERRIDE_BUTTON_NAME = "CustomWaypointsDeleteOverrideButton"
 
 local EnsureCwEscOverrideButton
 local RefreshCwEscOverride
 local HideTopCwModalFrame
+
+ShouldEnableKnownLocationsDeleteOverride = function()
+    local ui = STATE.knownLocationsUi
+    if not ui or not ui.frame or not ui.frame.IsShown or not ui.frame:IsShown() then
+        return false
+    end
+
+    local searchBox = ui.searchBox
+    if not searchBox then
+        return true
+    end
+
+    if GetCurrentKeyBoardFocus and GetCurrentKeyBoardFocus() == searchBox then
+        return false
+    end
+
+    return true
+end
 
 RefreshCwEscOverride = function()
     local owner = STATE.frame or UIParent
@@ -2625,14 +2644,23 @@ RefreshCwEscOverride = function()
         ClearOverrideBindings(owner)
     end
 
-    -- During combat, let WoW handle ESC normally (game menu / default close chain).
+    -- During combat, let WoW handle bindings normally.
     if InCombatLockdown and InCombatLockdown() then
         return
     end
 
-    if hasShown and SetOverrideBindingClick then
+    if not SetOverrideBindingClick then
+        return
+    end
+
+    if hasShown then
         EnsureCwEscOverrideButton()
         SetOverrideBindingClick(owner, true, "ESCAPE", CW_ESC_OVERRIDE_BUTTON_NAME, "LeftButton")
+    end
+
+    if ShouldEnableKnownLocationsDeleteOverride and ShouldEnableKnownLocationsDeleteOverride() then
+        EnsureCwDeleteOverrideButton()
+        SetOverrideBindingClick(owner, true, "SHIFT-DELETE", CW_DELETE_OVERRIDE_BUTTON_NAME, "LeftButton")
     end
 end
 
@@ -2665,6 +2693,22 @@ EnsureCwEscOverrideButton = function()
     btn:Hide()
     btn:SetScript("OnClick", function()
         HideTopCwModalFrame()
+    end)
+
+    return btn
+end
+
+EnsureCwDeleteOverrideButton = function()
+    local btn = _G[CW_DELETE_OVERRIDE_BUTTON_NAME]
+    if btn then return btn end
+
+    btn = CreateFrame("Button", CW_DELETE_OVERRIDE_BUTTON_NAME, UIParent, "SecureActionButtonTemplate")
+    btn:SetWidth(1)
+    btn:SetHeight(1)
+    btn:SetPoint("TOPLEFT", UIParent, "TOPLEFT", -1000, 998)
+    btn:Hide()
+    btn:SetScript("OnClick", function()
+        CustomWaypoints_DeleteSelectedKnownLocation()
     end)
 
     return btn
@@ -3956,7 +4000,7 @@ SaveQueueAsKnownRoute = function()
             return
         end
         if DEFAULT_CHAT_FRAME and DEFAULT_CHAT_FRAME.AddMessage then
-            DEFAULT_CHAT_FRAME:AddMessage("|cff80ff80CWPhase5B:|r " .. tostring(msg))
+            DEFAULT_CHAT_FRAME:AddMessage("|cff80ff80CW:|r " .. tostring(msg))
         end
     end
 
@@ -4877,6 +4921,23 @@ ShowKnownLocationImportPopup = function()
     if editor.SetFocus then editor:SetFocus() end
 end
 
+local function ReleaseKnownLocationsSearchFocus()
+    local ui = STATE.knownLocationsUi
+    if not ui then return end
+
+    local searchBox = ui.searchBox
+    if not searchBox then return end
+
+    if searchBox.ClearFocus then
+        searchBox:ClearFocus()
+    end
+    if searchBox.HighlightText then
+        searchBox:HighlightText(0, 0)
+    end
+
+    RefreshCwEscOverride()
+end
+
 RefreshKnownLocationsFrame = function()
     if not (STATE.knownLocationsUi and STATE.knownLocationsUi.frame) then return end
 
@@ -4932,6 +4993,7 @@ RefreshKnownLocationsFrame = function()
         row:SetPoint("TOPLEFT", content, "TOPLEFT", 0, yOffset)
         row:RegisterForClicks("LeftButtonUp")
         row:SetScript("OnClick", function()
+            ReleaseKnownLocationsSearchFocus()
             local now = GetTime and GetTime() or 0
             local uiState = STATE.knownLocationsUi
             local chosenBeforeRefresh = uiState and uiState.visibleEntries and uiState.visibleEntries[i] or nil
@@ -4995,6 +5057,7 @@ RefreshKnownLocationsFrame = function()
         routeBtn:SetPoint("RIGHT", row, "RIGHT", -8, 0)
         routeBtn:SetText("Route")
         routeBtn:SetScript("OnClick", function()
+            ReleaseKnownLocationsSearchFocus()
             SelectKnownLocation(i)
             local chosen = STATE.knownLocationsUi and STATE.knownLocationsUi.visibleEntries and STATE.knownLocationsUi.visibleEntries[i] or nil
             local absoluteIndex = ResolveKnownLocationAbsoluteIndex(chosen)
@@ -5011,6 +5074,7 @@ RefreshKnownLocationsFrame = function()
         editBtn:SetPoint("RIGHT", routeBtn, "LEFT", -6, 0)
         editBtn:SetText("Edit")
         editBtn:SetScript("OnClick", function()
+            ReleaseKnownLocationsSearchFocus()
             local chosen = STATE.knownLocationsUi and STATE.knownLocationsUi.visibleEntries and STATE.knownLocationsUi.visibleEntries[i] or nil
             if chosen then
                 ShowKnownLocationEditorPopup(chosen)
@@ -5135,6 +5199,7 @@ local function QueueKnownLocationsSearchFocus()
             if searchBox.HighlightText then
                 searchBox:HighlightText()
             end
+            RefreshCwEscOverride()
         end
     end)
 end
@@ -5148,6 +5213,7 @@ ShowKnownLocationsFrame = function()
             ArmKeyboardModalFrame(f)
             RefreshKnownLocationsFrame()
             f:Show()
+            RefreshCwEscOverride()
             QueueKnownLocationsSearchFocus()
         end
         return
@@ -5181,6 +5247,7 @@ ShowKnownLocationsFrame = function()
     end)
     f:SetScript("OnMouseDown", function(self)
         PushCwModalFrame(self)
+        ReleaseKnownLocationsSearchFocus()
     end)
 
     local bg = f:CreateTexture(nil, "BACKGROUND")
@@ -5215,8 +5282,23 @@ ShowKnownLocationsFrame = function()
     searchBox:SetWidth(180)
     searchBox:SetHeight(20)
     searchBox:SetPoint("LEFT", searchLabel, "RIGHT", 8, 0)
-    searchBox:SetScript("OnEscapePressed", function(self) self:ClearFocus() end)
-    searchBox:SetScript("OnEnterPressed", function(self) self:ClearFocus() end)
+    searchBox:SetScript("OnEscapePressed", function(self)
+        self:ClearFocus()
+        RefreshCwEscOverride()
+    end)
+    searchBox:SetScript("OnEnterPressed", function(self)
+        self:ClearFocus()
+        RefreshCwEscOverride()
+    end)
+    searchBox:SetScript("OnEditFocusGained", function()
+        RefreshCwEscOverride()
+    end)
+    searchBox:SetScript("OnEditFocusLost", function(self)
+        if self.HighlightText then
+            self:HighlightText(0, 0)
+        end
+        RefreshCwEscOverride()
+    end)
     searchBox:SetScript("OnTextChanged", function(self)
         if STATE.knownLocationsUi then
             STATE.knownLocationsUi.searchText = self:GetText() or ""
@@ -5229,6 +5311,7 @@ ShowKnownLocationsFrame = function()
     instanceCheck:SetPoint("LEFT", searchBox, "RIGHT", 18, 0)
     instanceCheck:SetChecked(false)
     instanceCheck:SetScript("OnClick", function(self)
+        ReleaseKnownLocationsSearchFocus()
         if STATE.knownLocationsUi then
             STATE.knownLocationsUi.instancesOnly = self:GetChecked() and true or false
             STATE.knownLocationsUi.selectedIndex = nil
@@ -5244,6 +5327,7 @@ ShowKnownLocationsFrame = function()
     routesCheck:SetPoint("LEFT", instanceLabel, "RIGHT", 18, 0)
     routesCheck:SetChecked(false)
     routesCheck:SetScript("OnClick", function(self)
+        ReleaseKnownLocationsSearchFocus()
         if STATE.knownLocationsUi then
             STATE.knownLocationsUi.routesOnly = self:GetChecked() and true or false
             STATE.knownLocationsUi.selectedIndex = nil
@@ -5259,6 +5343,7 @@ ShowKnownLocationsFrame = function()
     flightMastersCheck:SetPoint("LEFT", routesLabel, "RIGHT", 18, 0)
     flightMastersCheck:SetChecked(false)
     flightMastersCheck:SetScript("OnClick", function(self)
+        ReleaseKnownLocationsSearchFocus()
         if STATE.knownLocationsUi then
             STATE.knownLocationsUi.flightMastersOnly = self:GetChecked() and true or false
             STATE.knownLocationsUi.selectedIndex = nil
@@ -5274,6 +5359,7 @@ ShowKnownLocationsFrame = function()
     transportsCheck:SetPoint("LEFT", flightMastersLabel, "RIGHT", 18, 0)
     transportsCheck:SetChecked(false)
     transportsCheck:SetScript("OnClick", function(self)
+        ReleaseKnownLocationsSearchFocus()
         if STATE.knownLocationsUi then
             STATE.knownLocationsUi.transportsOnly = self:GetChecked() and true or false
             STATE.knownLocationsUi.selectedIndex = nil
@@ -5294,7 +5380,7 @@ ShowKnownLocationsFrame = function()
     refreshBtn:SetHeight(22)
     refreshBtn:SetPoint("BOTTOMLEFT", f, "BOTTOMLEFT", 12, 12)
     refreshBtn:SetText("Refresh")
-    refreshBtn:SetScript("OnClick", function() RefreshKnownLocationsFrame() end)
+    refreshBtn:SetScript("OnClick", function() ReleaseKnownLocationsSearchFocus() RefreshKnownLocationsFrame() end)
 
     local scrollFrame = CreateFrame("ScrollFrame", "CustomWaypointsKnownLocationsScrollFrame", f, "UIPanelScrollFrameTemplate")
     local content = CreateFrame("Frame", nil, scrollFrame)
@@ -5310,6 +5396,7 @@ ShowKnownLocationsFrame = function()
     routeSelectedBtn:SetPoint("LEFT", refreshBtn, "RIGHT", 8, 0)
     routeSelectedBtn:SetText("Route Selected")
     routeSelectedBtn:SetScript("OnClick", function()
+        ReleaseKnownLocationsSearchFocus()
         local ui = STATE.knownLocationsUi
         if not ui or not ui.selectedIndex or not ui.visibleEntries or not ui.visibleEntries[ui.selectedIndex] then
             return
@@ -5327,14 +5414,14 @@ ShowKnownLocationsFrame = function()
     exportBtn:SetHeight(22)
     exportBtn:SetPoint("LEFT", routeSelectedBtn, "RIGHT", 8, 0)
     exportBtn:SetText("Export")
-    exportBtn:SetScript("OnClick", function() ExportKnownLocations() end)
+    exportBtn:SetScript("OnClick", function() ReleaseKnownLocationsSearchFocus() ExportKnownLocations() end)
 
     local importBtn = CreateFrame("Button", nil, f, "UIPanelButtonTemplate")
     importBtn:SetWidth(70)
     importBtn:SetHeight(22)
     importBtn:SetPoint("LEFT", exportBtn, "RIGHT", 8, 0)
     importBtn:SetText("Import")
-    importBtn:SetScript("OnClick", function() ShowKnownLocationImportPopup() end)
+    importBtn:SetScript("OnClick", function() ReleaseKnownLocationsSearchFocus() ShowKnownLocationImportPopup() end)
     
     local deleteSelectedBtn = CreateFrame("Button", nil, f, "UIPanelButtonTemplate")
     deleteSelectedBtn:SetWidth(120)
@@ -5342,6 +5429,7 @@ ShowKnownLocationsFrame = function()
     deleteSelectedBtn:SetPoint("LEFT", importBtn, "RIGHT", 8, 0)
     deleteSelectedBtn:SetText("Delete Selected")
     deleteSelectedBtn:SetScript("OnClick", function()
+        ReleaseKnownLocationsSearchFocus()
         local ui = STATE.knownLocationsUi
         if not ui or not ui.selectedIndex or not ui.visibleEntries or not ui.visibleEntries[ui.selectedIndex] then
             pr("delete failed: no known route selected")
@@ -5381,6 +5469,7 @@ ShowKnownLocationsFrame = function()
     RefreshKnownLocationsFrame()
     ArmKeyboardModalFrame(f)
     f:Show()
+    RefreshCwEscOverride()
     QueueKnownLocationsSearchFocus()
 end
 
@@ -5802,11 +5891,24 @@ EnsureDeleteSelectedKnownLocationBinding = function()
     end
 
     STATE.deleteSelectedKnownLocationBindingInitialized = true
-    TryAutoBindCommand(
-        "CW_DELETE_SELECTED_KNOWN_LOCATION",
-        { "SHIFT-DELETE", "SHIFT-BACKSPACE" },
-        "delete selected known location"
-    )
+
+    if not (SetBinding and SaveBindings and GetCurrentBindingSet and GetBindingKey and GetBindingAction) then
+        return
+    end
+
+    local old1, old2 = GetBindingKey("CW_DELETE_SELECTED_KNOWN_LOCATION")
+    if old1 then SetBinding(old1, nil) end
+    if old2 then SetBinding(old2, nil) end
+
+    local currentShiftDelete = GetBindingAction("SHIFT-DELETE")
+    if currentShiftDelete and currentShiftDelete ~= "" then
+        SetBinding("SHIFT-DELETE", nil)
+    end
+
+    SetBinding("SHIFT-DELETE", "CW_DELETE_SELECTED_KNOWN_LOCATION")
+    SaveBindings(GetCurrentBindingSet())
+
+    dbg("delete selected known location binding hard-forced to SHIFT-DELETE")
 end
 
 EnsureSaveHereBinding = function()
@@ -6006,6 +6108,9 @@ local function EnsureUi()
     scroll:SetPoint("TOPLEFT", f, "TOPLEFT", 20, -250)
     scroll:SetPoint("BOTTOMRIGHT", f, "BOTTOMRIGHT", -32, 12)
 
+    scroll:EnableMouse(true)
+    scroll:SetScript("OnMouseDown", function() end)
+
     local output = CreateFrame("EditBox", "CustomWaypointsScrollChild", scroll)
     output:SetMultiLine(true)
     output:SetAutoFocus(false)
@@ -6013,8 +6118,8 @@ local function EnsureUi()
     -- Allow typing notes, selection, Ctrl+C copy when focused (chat log still refreshed by addon).
     -- if output.EnableKeyboard then output:EnableKeyboard(true) end
     output:SetFontObject(ChatFontNormal)
-    output:SetWidth(690)
-    output:SetHeight(200)
+    local scrollW = (f:GetWidth() or 760) - 20 - 32
+    output:SetWidth(scrollW)    output:SetHeight(200)
     output:SetJustifyH("LEFT")
     if output.SetMaxLetters then output:SetMaxLetters(120000) end
     output:SetScript("OnEscapePressed", function(self) self:ClearFocus() end)
@@ -6089,7 +6194,7 @@ local function EnsureInterfaceOptionsPanel()
     end
     if not InterfaceOptions_AddCategory then return nil end
 
-    local panel = CreateFrame("Frame", "CWPhase5BInterfaceOptions", UIParent)
+    local panel = CreateFrame("Frame", "CWInterfaceOptions", UIParent)
     panel.name = "CustomWaypoints"
 
     local title = panel:CreateFontString(nil, "ARTWORK", "GameFontNormalLarge")
@@ -6184,24 +6289,24 @@ end
 local function InstallUndoRedoBindings()
     if STATE.bindingsInstalled then return end
 
-    if not _G.CWPhase5BUndoHotkeyButton then
-        local b = CreateFrame("Button", "CWPhase5BUndoHotkeyButton", UIParent)
+    if not _G.CWUndoHotkeyButton then
+        local b = CreateFrame("Button", "CWUndoHotkeyButton", UIParent)
         b:SetScript("OnClick", function()
             UndoHistory()
         end)
         b:Hide()
     end
-    if not _G.CWPhase5BRedoHotkeyButton then
-        local b = CreateFrame("Button", "CWPhase5BRedoHotkeyButton", UIParent)
+    if not _G.CWRedoHotkeyButton then
+        local b = CreateFrame("Button", "CWRedoHotkeyButton", UIParent)
         b:SetScript("OnClick", function()
             RedoHistory()
         end)
         b:Hide()
     end
 
-    local b = _G.CWPhase5BClearHotkeyButton
+    local b = _G.CWClearHotkeyButton
     if not b then
-        b = CreateFrame("Button", "CWPhase5BClearHotkeyButton", UIParent)
+        b = CreateFrame("Button", "CWClearHotkeyButton", UIParent)
         b:Hide()
     end
 
@@ -6231,9 +6336,9 @@ local function InstallUndoRedoBindings()
         RefreshUiHeader()
     end)
 
-    local undoClick = "CLICK CWPhase5BUndoHotkeyButton:LeftButton"
-    local redoClick = "CLICK CWPhase5BRedoHotkeyButton:LeftButton"
-    local clearClick = "CLICK CWPhase5BClearHotkeyButton:LeftButton"
+    local undoClick = "CLICK CWUndoHotkeyButton:LeftButton"
+    local redoClick = "CLICK CWRedoHotkeyButton:LeftButton"
+    local clearClick = "CLICK CWClearHotkeyButton:LeftButton"
     local bindChanged = false
 
     local function CanAssignKey(key, boundTo)
@@ -6244,7 +6349,7 @@ local function InstallUndoRedoBindings()
 
     if CanAssignKey("CTRL-SHIFT-Z", undoClick) then
         if SetBindingClick then
-            SetBindingClick("CTRL-SHIFT-Z", "CWPhase5BUndoHotkeyButton", "LeftButton")
+            SetBindingClick("CTRL-SHIFT-Z", "CWUndoHotkeyButton", "LeftButton")
             bindChanged = true
         elseif SetBinding then
             SetBinding("CTRL-SHIFT-Z", undoClick)
@@ -6254,7 +6359,7 @@ local function InstallUndoRedoBindings()
 
     if CanAssignKey("CTRL-SHIFT-Y", redoClick) then
         if SetBindingClick then
-            SetBindingClick("CTRL-SHIFT-Y", "CWPhase5BRedoHotkeyButton", "LeftButton")
+            SetBindingClick("CTRL-SHIFT-Y", "CWRedoHotkeyButton", "LeftButton")
             bindChanged = true
         elseif SetBinding then
             SetBinding("CTRL-SHIFT-Y", redoClick)
@@ -6264,7 +6369,7 @@ local function InstallUndoRedoBindings()
 
     if CanAssignKey("CTRL-SHIFT-C", clearClick) then
         if SetBindingClick then
-            SetBindingClick("CTRL-SHIFT-C", "CWPhase5BClearHotkeyButton", "LeftButton")
+            SetBindingClick("CTRL-SHIFT-C", "CWClearHotkeyButton", "LeftButton")
             bindChanged = true
         elseif SetBinding then
             SetBinding("CTRL-SHIFT-C", clearClick)
@@ -8061,9 +8166,9 @@ AddCurrentLocationWithMetadataPopup = function()
             dest.description = meta.description ~= "" and meta.description or nil
             dest.ts = date("%Y-%m-%d %H:%M:%S")
             tinsert(STATE.db.destinations, dest)
-            if STATE.db.autoAdvance then
-                SlashHandler("autoadvance")
-            end
+            -- if STATE.db.autoAdvance then
+            --     SlashHandler("autoadvance")
+            -- end
             HandleQueueBecameNonEmpty("add-current-location-waypoint", wasEmpty)
             InvalidateRoute("current location waypoint added")
             RefreshUiHeader()
@@ -8273,7 +8378,7 @@ EnsureCarboniteMapButtons = function()
     local b = STATE.mapSaveRouteButton
 
     if not b or (b.IsObjectType and not b:IsObjectType("Button")) then
-        b = CreateFrame("Button", "CWPhase5BSaveRouteMapButton", parent, "UIPanelButtonTemplate")
+        b = CreateFrame("Button", "CWSaveRouteMapButton", parent, "UIPanelButtonTemplate")
         b:SetWidth(88)
         b:SetHeight(20)
         b:SetText("Save Route")

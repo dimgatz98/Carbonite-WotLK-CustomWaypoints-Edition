@@ -112,7 +112,7 @@ That login push **does not** look at the autosync toggle — autosync only contr
 
 Usually one of these:
 
-1. **Auto advance** (`autoadvance` on by default) removes stop **#1** when you’re within **`reachDistanceYards`** (default 10) **on the same map id** as that stop. You’ll see **`CWPhase5B: completed #1 => …`** in chat if that happened. Turn it off: **`/cw autoadvance`** or uncheck in the UI / Interface panel.  
+1. **Auto advance** (`autoadvance` on by default) removes stop **#1** when you’re within **`reachDistanceYards`** (default 10) **on the same map id** as that stop. You’ll see **`CW: completed #1 => …`** in chat if that happened. Turn it off: **`/cw autoadvance`** or uncheck in the UI / Interface panel.  
 2. **Carbonite cleared targets** (right-click clear, another route addon, etc.). CustomW’s queue follows that — you now get a clear **`queue cleared (Carbonite Goto / targets were cleared in-game)`** message so it’s obvious.  
 3. After an update, **`debug` off** hides diagnostics — turn **`/cw debug`** on once if you’re chasing this.
 
