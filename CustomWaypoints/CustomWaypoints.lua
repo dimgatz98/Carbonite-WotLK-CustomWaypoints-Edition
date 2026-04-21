@@ -92,7 +92,7 @@ local DEFAULTS = {
     useIntercontinentalRouting = true,
     useFlightMasters = true,
     hasFlyingMount = false,
-    simplifyTransitWaypoints = true,
+    simplifyTransitWaypoints = false,
     showUi = true,
     uiScale = 1,
     transportDiscoveryEnabled = true,
@@ -4423,16 +4423,137 @@ local function ShowKnownPointEditorPopup(sourceIndex, loc, titleText)
     descBox:SetPoint("LEFT", descLabel, "RIGHT", 10, 0)
     descBox:SetText(loc.description or "")
 
-    local fmCheck = CreateFrame("CheckButton", nil, f, "UICheckButtonTemplate")
-    fmCheck:SetPoint("TOPLEFT", descLabel, "BOTTOMLEFT", 0, -18)
-    fmCheck:SetChecked(CanonicalTransportKind(loc.transportKind or "") == "flight_master")
+    local function BuildCycleButton(parent, width, height, values, initialValue, formatValue)
+        local btn = CreateFrame("Button", nil, parent, "UIPanelButtonTemplate")
+        btn:SetWidth(width)
+        btn:SetHeight(height)
+        btn._values = values or {}
+        btn._index = 1
+        btn._formatValue = formatValue
 
-    local fmLabel = f:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-    fmLabel:SetPoint("LEFT", fmCheck, "RIGHT", 2, 0)
-    fmLabel:SetText("Flight Master")
+        local function applyIndex(idx)
+            if #btn._values == 0 then return end
+            if idx < 1 then idx = #btn._values end
+            if idx > #btn._values then idx = 1 end
+            btn._index = idx
+            local value = btn._values[idx]
+            local textValue = formatValue and formatValue(value) or tostring(value or "")
+            btn:SetText(textValue)
+        end
+
+        function btn:GetSelectedValue()
+            return self._values[self._index]
+        end
+
+        function btn:SetSelectedValue(value)
+            for idx, candidate in ipairs(self._values) do
+                if tostring(candidate) == tostring(value) then
+                    applyIndex(idx)
+                    return
+                end
+            end
+            applyIndex(1)
+        end
+
+        btn:SetScript("OnClick", function(self)
+            if self.IsEnabled and not self:IsEnabled() then return end
+            applyIndex(self._index + 1)
+            if self._afterChange then
+                self:_afterChange()
+            end
+        end)
+
+        btn:SetSelectedValue(initialValue)
+        return btn
+    end
+
+    local isLearnedTransportEntry = loc.sourceType == "learnedTransport"
+    local entryTypeValues = isLearnedTransportEntry and { "transport" } or { "route", "instance", "known" }
+    local initialEntryType = isLearnedTransportEntry and "transport" or tostring(loc.kind or "known")
+    if initialEntryType ~= "route" and initialEntryType ~= "instance" and initialEntryType ~= "known" then
+        initialEntryType = "known"
+    end
+
+    local typeLabel = f:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    typeLabel:SetPoint("TOPLEFT", descLabel, "BOTTOMLEFT", 0, -18)
+    typeLabel:SetText("Entry type")
+
+    local typeButton = BuildCycleButton(f, 150, 22, entryTypeValues, initialEntryType, function(value)
+        if value == "route" then return "Route" end
+        if value == "instance" then return "Instance" end
+        if value == "transport" then return "Transport" end
+        return "Known"
+    end)
+    typeButton:SetPoint("LEFT", typeLabel, "RIGHT", 10, 0)
+
+    local transportKindValues = { "route", "portal", "tram", "boat", "zeppelin", "flight_master" }
+    local initialTransportKind = CanonicalTransportKind(loc.transportKind or (isLearnedTransportEntry and "route" or "route"))
+    if initialTransportKind == "transport" then
+        initialTransportKind = "route"
+    end
+
+    local transportKindLabel = f:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    transportKindLabel:SetPoint("LEFT", typeButton, "RIGHT", 16, 0)
+    transportKindLabel:SetText("Transport kind")
+
+    local transportKindButton = BuildCycleButton(f, 170, 22, transportKindValues, initialTransportKind, function(value)
+        if value == "flight_master" then return "Flight Master" end
+        if value == "route" then return "Route" end
+        return tostring(value or "")
+    end)
+    transportKindButton:SetPoint("LEFT", transportKindLabel, "RIGHT", 10, 0)
+
+    local bidirectionalCheck = CreateFrame("CheckButton", nil, f, "UICheckButtonTemplate")
+    bidirectionalCheck:SetPoint("TOPLEFT", typeLabel, "BOTTOMLEFT", 0, -18)
+    bidirectionalCheck:SetChecked((loc.bidirectional == true) or CanonicalTransportKind(loc.transportKind or "") == "flight_master")
+
+    local function SetEditorCheckboxEnabled(checkbox, enabled)
+        if not checkbox then return end
+        if checkbox.EnableMouse then checkbox:EnableMouse(enabled and true or false) end
+        if checkbox.SetAlpha then checkbox:SetAlpha(enabled and 1 or 0.5) end
+        checkbox._cwDisabled = not enabled
+    end
+
+    local function RefreshEditorTypeState()
+        local selectedEntryType = tostring(typeButton:GetSelectedValue() or initialEntryType or "known")
+        local selectedTransportKind = CanonicalTransportKind(transportKindButton:GetSelectedValue() or initialTransportKind or "route")
+        local transportActive = isLearnedTransportEntry or selectedEntryType == "route"
+        local forceBidirectional = transportActive and selectedTransportKind == "flight_master"
+        local bidirectionalActive = transportActive and not forceBidirectional
+
+        if transportKindButton.Disable and transportKindButton.Enable then
+            if transportActive then
+                transportKindButton:Enable()
+            else
+                transportKindButton:Disable()
+            end
+        end
+        if transportKindButton.SetAlpha then
+            transportKindButton:SetAlpha(transportActive and 1 or 0.5)
+        end
+
+        if forceBidirectional then
+            bidirectionalCheck:SetChecked(true)
+        elseif not transportActive then
+            bidirectionalCheck:SetChecked(false)
+        end
+        SetEditorCheckboxEnabled(bidirectionalCheck, bidirectionalActive)
+    end
+
+    local bidirectionalLabel = f:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    bidirectionalLabel:SetPoint("LEFT", bidirectionalCheck, "RIGHT", 2, 0)
+    bidirectionalLabel:SetText("Bidirectional")
+
+    typeButton._afterChange = RefreshEditorTypeState
+    transportKindButton._afterChange = RefreshEditorTypeState
+    if typeButton.Disable and typeButton.Enable and isLearnedTransportEntry then
+        typeButton:Disable()
+        if typeButton.SetAlpha then typeButton:SetAlpha(0.5) end
+    end
+    RefreshEditorTypeState()
 
     local pointLabel = f:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-    pointLabel:SetPoint("TOPLEFT", fmCheck, "BOTTOMLEFT", 0, -18)
+    pointLabel:SetPoint("TOPLEFT", bidirectionalCheck, "BOTTOMLEFT", 0, -18)
     pointLabel:SetText("Import block")
 
     local scroll = CreateFrame("ScrollFrame", frameName .. "Scroll", f, "UIPanelScrollFrameTemplate")
@@ -4581,8 +4702,11 @@ local function ShowKnownPointEditorPopup(sourceIndex, loc, titleText)
             edge.fromInstanceType = parsedTransport.fromInstanceType
             edge.toInstance = parsedTransport.toInstance
             edge.toInstanceType = parsedTransport.toInstanceType
-            edge.transportKind = fmCheck:GetChecked() and "flight_master" or CanonicalTransportKind(parsedTransport.transportKind or "transport")
-            edge.bidirectional = fmCheck:GetChecked() and true or (parsedTransport.bidirectional and true or false)
+            edge.transportKind = CanonicalTransportKind(transportKindButton:GetSelectedValue() or parsedTransport.transportKind or "route")
+            if edge.transportKind == "transport" then
+                edge.transportKind = "route"
+            end
+            edge.bidirectional = (edge.transportKind == "flight_master") and true or (bidirectionalCheck:GetChecked() and true or false)
             if parsedTransport.label and parsedTransport.label ~= "" then
                 edge.label = parsedTransport.label
             end
@@ -4619,17 +4743,47 @@ local function ShowKnownPointEditorPopup(sourceIndex, loc, titleText)
             return
         end
 
+        local selectedEntryType = tostring(typeButton:GetSelectedValue() or candidate.kind or stored.kind or "known")
+        local selectedTransportKind = CanonicalTransportKind(transportKindButton:GetSelectedValue() or candidate.transportKind or stored.transportKind or "route")
+        if selectedTransportKind == "transport" then
+            selectedTransportKind = "route"
+        end
+        local selectedBidirectional = (selectedTransportKind == "flight_master") and true or (bidirectionalCheck:GetChecked() and true or false)
+
         stored.name = candidate.name ~= "" and candidate.name or stored.name
         stored.label = candidate.label ~= "" and candidate.label or nil
         stored.description = candidate.description ~= "" and candidate.description or nil
-        stored.routePoints = CloneDestinations(candidate.routePoints)
-        stored.destination = CloneDestination(candidate.destination)
-        stored.mapName = candidate.mapName
-        stored.kind = "route"
-        stored.instance = candidate.instance
-        stored.instanceType = candidate.instanceType
-        stored.transportKind = fmCheck:GetChecked() and "flight_master" or CanonicalTransportKind(candidate.transportKind or "route")
-        stored.bidirectional = fmCheck:GetChecked() and true or false
+        stored.transportKind = selectedTransportKind
+        stored.bidirectional = selectedBidirectional
+
+        if selectedEntryType == "route" then
+            if type(candidate.routePoints) ~= "table" or #(candidate.routePoints or {}) == 0 then
+                pr("known location edit failed: route type needs a route block with at least one waypoint")
+                return
+            end
+            stored.kind = "route"
+            stored.routePoints = CloneDestinations(candidate.routePoints)
+            stored.destination = CloneDestination(candidate.destination)
+            stored.mapName = candidate.mapName
+            stored.instance = nil
+            stored.instanceType = nil
+        else
+            if stored.kind == "route" then
+                pr("known location edit failed: route -> single-point conversion is blocked to avoid losing route waypoints")
+                return
+            end
+            local singleDest = CloneKnownLocationDestination(candidate) or CloneDestination(candidate.destination)
+            if not singleDest then
+                pr("known location edit failed: selected type needs one destination point")
+                return
+            end
+            stored.kind = selectedEntryType
+            stored.routePoints = nil
+            stored.destination = CloneDestination(singleDest)
+            stored.mapName = singleDest.mapName or candidate.mapName
+            stored.instance = (selectedEntryType == "instance") and true or nil
+            stored.instanceType = (selectedEntryType == "instance") and (candidate.instanceType or stored.instanceType or "instance") or nil
+        end
 
         NormalizeKnownLocationAfterEdit(stored)
         InvalidateRoute("edited known route")
@@ -5415,7 +5569,7 @@ RefreshKnownLocationsFrame = function()
 
     if ui.deleteSelectedBtn then
         local selected = ui.selectedIndex and visibleEntries[ui.selectedIndex] or nil
-        if selected and selected.kind == "route" then
+        if selected then
             ui.deleteSelectedBtn:Enable()
         else
             ui.deleteSelectedBtn:Disable()
@@ -5744,7 +5898,7 @@ ShowKnownLocationsFrame = function()
         ReleaseKnownLocationsSearchFocus()
         local ui = STATE.knownLocationsUi
         if not ui or not ui.selectedIndex or not ui.visibleEntries or not ui.visibleEntries[ui.selectedIndex] then
-            pr("delete failed: no known route selected")
+            pr("delete failed: no known location selected")
             return
         end
 
@@ -6362,24 +6516,17 @@ local function EnsureUi()
         ShowWaypointImportPopup()
     end)
 
-    local manageBtn = CreateFrame("Button", nil, f, "UIPanelButtonTemplate")
-    manageBtn:SetWidth(120)
-    manageBtn:SetHeight(22)
-    manageBtn:SetPoint("TOPLEFT", f, "TOPLEFT", 340, -98)
-    manageBtn:SetText("Manage Transports")
-    manageBtn:SetScript("OnClick", function() ShowTransportManagementFrame() end)
-
     local knownBtn = CreateFrame("Button", nil, f, "UIPanelButtonTemplate")
     knownBtn:SetWidth(120)
     knownBtn:SetHeight(22)
-    knownBtn:SetPoint("TOPLEFT", f, "TOPLEFT", 460, -98)
+    knownBtn:SetPoint("TOPLEFT", f, "TOPLEFT", 340, -98)
     knownBtn:SetText("Known Locations")
     knownBtn:SetScript("OnClick", function() ShowKnownLocationsFrame() end)
 
     local saveRouteBtn = CreateFrame("Button", nil, f, "UIPanelButtonTemplate")
     saveRouteBtn:SetWidth(100)
     saveRouteBtn:SetHeight(22)
-    saveRouteBtn:SetPoint("TOPLEFT", f, "TOPLEFT", 586, -98)
+    saveRouteBtn:SetPoint("TOPLEFT", f, "TOPLEFT", 467, -98)
     saveRouteBtn:SetText("Save Route")
     saveRouteBtn:SetScript("OnClick", function() SaveQueueAsKnownRoute() end)
 
@@ -6414,7 +6561,7 @@ local function EnsureUi()
     commands:SetPoint("TOPLEFT", f, "TOPLEFT", 12, -142)
     commands:SetWidth(720)
     commands:SetJustifyH("LEFT")
-    commands:SetText("\n/cw help | ui | tuning | options | probe | add | list | export | import | sync | route | graph | clear | pop | undo | redo | autosync | autoadvance | hasflying | flightmasters | deep | minimal | debug | simplify | legend | transports | cleartransports | transportlog | autodiscovery | transportconfirmation | managetransports | knownlocations | routeknown <index> | saveroute | savehere")
+    commands:SetText("\n/cw help | ui | tuning | options | probe | add | list | export | import | sync | route | graph | clear | pop | undo | redo | autosync | autoadvance | hasflying | flightmasters | deep | minimal | debug | simplify | legend | transports | cleartransports | transportlog | autodiscovery | transportconfirmation | knownlocations | routeknown <index> | saveroute | savehere")
 
     local scroll = CreateFrame("ScrollFrame", "CustomWaypointsScrollFrame", f, "UIPanelScrollFrameTemplate")
     scroll:SetPoint("TOPLEFT", f, "TOPLEFT", 20, -250)
@@ -9254,7 +9401,7 @@ SlashHandler = function(msg)
     msg = string.lower(rawMsg)
 
     if msg == "" or msg == "help" then
-        pr("commands: /cw ui | tuning | options | help | probe | add | list | export | import | sync | route | graph | clear | pop | undo | redo | autosync | autoadvance | autodiscovery | hasflying | flightmasters | deep | minimal | debug | debugfm <name> | simplify | legend | transports | cleartransports | transportlog | transportconfirmation | managetransports | saveroute | savehere")
+        pr("commands: /cw ui | tuning | options | help | probe | add | list | export | import | sync | route | graph | clear | pop | undo | redo | autosync | autoadvance | autodiscovery | hasflying | flightmasters | deep | minimal | debug | debugfm <name> | simplify | legend | transports | cleartransports | transportlog | transportconfirmation | knownlocations | saveroute | savehere")
         return
     elseif msg == "ui" or msg == "panel" or msg == "window" then
         EnsureUi()
@@ -9379,7 +9526,7 @@ SlashHandler = function(msg)
         STATE.db.transportConfirmationEnabled = not STATE.db.transportConfirmationEnabled
         pr("transportConfirmationEnabled=" .. tostring(STATE.db.transportConfirmationEnabled))
     elseif msg == "managetransports" then
-        ShowTransportManagementFrame()
+        ShowKnownLocationsFrame()
     elseif msg == "knownlocations" or msg == "known" then
         ShowKnownLocationsFrame()
     elseif msg:match("^routeknown%s+%d+$") then
