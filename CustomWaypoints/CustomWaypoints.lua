@@ -92,10 +92,10 @@ local DEFAULTS = {
     useIntercontinentalRouting = true,
     useFlightMasters = true,
     hasFlyingMount = false,
-    simplifyTransitWaypoints = false,
+    simplifyTransitWaypoints = true,
     showUi = true,
     uiScale = 1,
-    transportDiscoveryEnabled = true,
+    transportDiscoveryEnabled = false,
     transportLogEnabled = false,
     transportConfirmationEnabled = true,
     autoRouteSavedInstanceOnDeath = true,
@@ -355,6 +355,80 @@ local function CloneTransportEdgeWithEndpoints(edge)
     return NormalizeTransportRecord(copy)
 end
 
+CW.TRANSPORT_ENDPOINT_SWAP_SUFFIXES = {
+    "MaI",
+    "MapName",
+    "Zx",
+    "Zy",
+    "Wx",
+    "Wy",
+    "Instance",
+    "InstanceType",
+    "ZoneName",
+    "ZoneText",
+    "SubZoneText",
+}
+
+function CW.BuildTransportEndpointLookupAliases(edge, prefix)
+    local out, seen = {}, {}
+
+    local function add(value)
+        local key = CW.NormalizeZoneLookupKey(value)
+        if key ~= "" and not seen[key] then
+            seen[key] = true
+            out[#out + 1] = value
+        end
+    end
+
+    add(edge and edge[prefix .. "SubZoneText"])
+    add(edge and edge[prefix .. "ZoneText"])
+    add(edge and edge[prefix .. "ZoneName"])
+    add(edge and edge[prefix .. "MapName"])
+
+    return out
+end
+
+function CW.ReverseTransportEdgeDirection(edge)
+    local copy = CloneTransportEdgeWithEndpoints(edge)
+    if not copy then return nil end
+
+    for _, suffix in ipairs(CW.TRANSPORT_ENDPOINT_SWAP_SUFFIXES) do
+        copy["from" .. suffix], copy["to" .. suffix] = copy["to" .. suffix], copy["from" .. suffix]
+    end
+
+    return NormalizeTransportRecord(copy)
+end
+
+function CW.OrientTransportEdgeTowardDestination(edge, name)
+    local copy = CloneTransportEdgeWithEndpoints(edge)
+    if not copy then return nil end
+    if not IsBidirectionalTransportRecord(copy) then
+        return copy
+    end
+
+    local targetKey = CW.NormalizeZoneLookupKey(name)
+    if targetKey == "" then
+        return copy
+    end
+
+    local function endpointMatches(prefix)
+        for _, value in ipairs(CW.BuildTransportEndpointLookupAliases(copy, prefix)) do
+            if CW.ZoneLookupKeysMatchLoosely(value, targetKey) then
+                return true
+            end
+        end
+        return false
+    end
+
+    local fromMatches = endpointMatches("from")
+    local toMatches = endpointMatches("to")
+
+    if fromMatches and not toMatches then
+        return CW.ReverseTransportEdgeDirection(copy)
+    end
+
+    return copy
+end
 
 function CW.BuildManualTransportFromRoutePoints(routePoints, opts)
     if type(routePoints) ~= "table" or #routePoints ~= 2 then
@@ -1322,6 +1396,55 @@ local function GetKnownRouteHopCostSeconds(loc, a, b)
     return TransportCostSeconds(transportKind, a.wx, a.wy, b.wx, b.wy)
 end
 
+local function InjectKnownTransportEdges(addNode, addEdge, graph, map)
+    local known = STATE.db and STATE.db.knownLocations or nil
+    if type(known) ~= "table" or #known == 0 then return end
+    if not (map and map.GZP) then return end
+
+    local function validMapPoint(maI, wx, wy)
+        local ok, zx, zy = pcall(map.GZP, map, maI, wx, wy)
+        return ok and zx and zy and zx >= 0 and zx <= 100 and zy >= 0 and zy <= 100
+    end
+
+    for _, loc in ipairs(known) do
+        if loc and tostring(loc.kind or "") == "transport" then
+            local edge = CW.BuildManualTransportLikeEdgeFromKnownLocation(loc)
+            if edge and edge.toMaI and edge.toWx and edge.toWy then
+                local transportKind = CanonicalTransportKind(edge.transportKind or "transport")
+                local label = tostring(edge.label or edge.name or edge.toZoneName or edge.toMapName or "Known transport")
+                local bidirectional = IsBidirectionalTransportRecord(edge)
+                local toNode = addNode(edge.toMaI, edge.toWx, edge.toWy, edge.toMapName or tostring(edge.toMaI), "transport")
+                if graph.nodes[toNode] then
+                    graph.nodes[toNode].knownTransport = true
+                    graph.nodes[toNode].knownTransportLabel = label
+                end
+
+                if CW.IsSingleNodeManualTransportEdge(edge) then
+                    local aliasMaI = CW.ResolveBestMapIdFromTransportAliases(edge)
+                    if aliasMaI and tonumber(aliasMaI) and tonumber(aliasMaI) ~= tonumber(edge.toMaI) and validMapPoint(aliasMaI, edge.toWx, edge.toWy) then
+                        local aliasLabel = tostring(edge.toZoneName or edge.toSubZoneText or edge.toZoneText or label)
+                        local fromNode = addNode(aliasMaI, edge.toWx, edge.toWy, aliasLabel, "transport")
+                        if graph.nodes[fromNode] then
+                            graph.nodes[fromNode].knownTransport = true
+                            graph.nodes[fromNode].knownTransportLabel = label
+                        end
+                        addEdge(fromNode, toNode, TransportCostSeconds(transportKind, edge.toWx, edge.toWy, edge.toWx, edge.toWy), transportKind, label, bidirectional)
+                        graph.links[#graph.links + 1] = { a = fromNode, b = toNode, type = transportKind, knownTransport = true, bidirectional = bidirectional }
+                    end
+                elseif edge.fromMaI and edge.fromWx and edge.fromWy then
+                    local fromNode = addNode(edge.fromMaI, edge.fromWx, edge.fromWy, edge.fromMapName or tostring(edge.fromMaI), "transport")
+                    if graph.nodes[fromNode] then
+                        graph.nodes[fromNode].knownTransport = true
+                        graph.nodes[fromNode].knownTransportLabel = label
+                    end
+                    addEdge(fromNode, toNode, TransportCostSeconds(transportKind, edge.fromWx, edge.fromWy, edge.toWx, edge.toWy), transportKind, label, bidirectional)
+                    graph.links[#graph.links + 1] = { a = fromNode, b = toNode, type = transportKind, knownTransport = true, bidirectional = bidirectional }
+                end
+            end
+        end
+    end
+end
+
 local function InjectKnownRouteEdges(addNode, addEdge, graph)
     local known = STATE.db and STATE.db.knownLocations or nil
     if type(known) ~= "table" or #known == 0 then return end
@@ -1721,6 +1844,7 @@ local function EnsureGraph()
     end
 
     InjectLearnedTransportEdges(addNode, addEdge, graph)
+    InjectKnownTransportEdges(addNode, addEdge, graph, map)
     InjectKnownRouteEdges(addNode, addEdge, graph)
 
     local taxiNodes = BuildKnownTaxiNodes(map)
@@ -7204,6 +7328,13 @@ GetPlayerWorldPos = function()
 
         if continent and continent > 0 and zone and zone > 0 and Nx.Map.CZ2I[continent] and Nx.Map.CZ2I[continent][zone] then
             local maI = Nx.Map.CZ2I[continent][zone]
+            if map.GRMI then
+                local ok, resolvedMaI = pcall(map.GRMI, map)
+                if ok and tonumber(resolvedMaI) and tonumber(resolvedMaI) > 0 then
+                    maI = tonumber(resolvedMaI)
+                end
+            end
+
             local px, py = GetPlayerMapPosition("player")
 
             if oldCont and oldZone and SetMapZoom then
@@ -8349,6 +8480,97 @@ function CW.ParseZoneAndCoordsFromSlashArgs(rawMsg)
     }
 end
 
+function CW.ParseCurrentMapCoordsFromSlashArgs(rawMsg)
+    local xToken, yToken = tostring(rawMsg or ""):match("^%s*([^%s]+)%s+([^%s]+)%s*$")
+    if not xToken then return nil end
+
+    local zx = CW.ParseZoneCoordinateNumber(xToken)
+    local zy = CW.ParseZoneCoordinateNumber(yToken)
+    if not (zx and zy) then return nil end
+    if zx < 0 or zx > 100 or zy < 0 or zy > 100 then
+        return nil, "coords-out-of-range"
+    end
+
+    return {
+        zx = zx,
+        zy = zy,
+    }
+end
+
+function CW.AddWaypointOnCurrentMapCoords(zx, zy)
+    if not zx or not zy then
+        pr("usage: /cw <x> <y>")
+        return
+    end
+
+    zx = tonumber(zx)
+    zy = tonumber(zy)
+
+    if not zx or not zy then
+        pr("invalid coordinates")
+        return
+    end
+
+    if zx < 0 or zx > 100 or zy < 0 or zy > 100 then
+        pr("zone coordinates out of range: expected 0-100 values")
+        return
+    end
+
+    local map = GetMap(1)
+    if not map then
+        pr("current map unavailable")
+        return
+    end
+
+    local mapId = map.GCMI and map:GCMI()
+    if not mapId then
+        pr("failed to resolve current map")
+        return
+    end
+
+    local wx, wy = map:GWP(zx / 100, zy / 100)
+    if not wx or not wy then
+        pr("failed to convert coords")
+        return
+    end
+
+    local dest = BuildPointFromAnchor(mapId, zx, zy, nil, "connector")
+    if not dest then
+        pr("failed to build destination")
+        return
+    end
+
+    dest.ts = date("%Y-%m-%d %H:%M:%S")
+    dest.zoneText = dest.zoneText or dest.mapName
+    dest.subZoneText = dest.subZoneText or dest.mapName
+
+    local wasEmpty = #(STATE.db.destinations or {}) == 0
+    PushHistorySnapshot("add-waypoint")
+    STATE.lastCaptureTime = GetTime() or 0
+    tinsert(STATE.db.destinations, dest)
+    HandleQueueBecameNonEmpty("add-waypoint", wasEmpty)
+
+    dbg(format("saved #%d => GCMI=%d (%s) zx=%.1f zy=%.1f wx=%.3f wy=%.3f",
+        #STATE.db.destinations,
+        dest.maI or -1,
+        dest.mapName or "?",
+        dest.zx or -1,
+        dest.zy or -1,
+        dest.wx or -1,
+        dest.wy or -1))
+
+    InvalidateRoute("waypoint added")
+    if STATE.db.autoSyncToCarbonite then
+        SyncQueueToCarbonite()
+    end
+
+    if EnsureQueueButtons then
+        EnsureQueueButtons()
+    elseif RefreshUiHeader then
+        RefreshUiHeader()
+    end
+end
+
 function CW.FormatZoneResolveMatches(matches)
     if type(matches) ~= "table" or #matches == 0 then return nil end
     local out = {}
@@ -8374,7 +8596,7 @@ function CW.ResolveManualTransportDestinationByName(name)
 
     local function tryEdge(edge)
         local kind = CanonicalTransportKind(edge and (edge.transportKind or edge.type) or "transport")
-        if not (kind == "passage" or kind == "portal" or kind == "transport" or kind == "flight_master") then
+        if not (kind == "passage" or kind == "portal" or kind == "transport" or kind == "flight_master" or kind == "route") then
             return
         end
 
@@ -8411,13 +8633,13 @@ function CW.ResolveManualTransportDestinationByName(name)
     end
 
     if #exactMatches == 1 then
-        return exactMatches[1], nil
+        return CW.OrientTransportEdgeTowardDestination(exactMatches[1], name), nil
     end
     if #exactMatches > 1 then
         return nil, "ambiguous"
     end
     if #looseMatches == 1 then
-        return looseMatches[1], nil
+        return CW.OrientTransportEdgeTowardDestination(looseMatches[1], name), nil
     end
     if #looseMatches > 1 then
         return nil, "ambiguous"
@@ -8452,18 +8674,20 @@ function CW.AddWaypointFromZoneCoords(zoneName, zx, zy)
         and CW.TransportDestinationAliasMatches(resolvedTransport, zoneName)
 
     if preferTransport then
-        if not maI then
+        if singleNodeTransport then
             maI = transportResolvedMaI or resolvedTransport.toMaI
-            why = nil
-            matches = nil
-        elseif not singleNodeTransport then
+        else
             maI = resolvedTransport.toMaI
-            why = nil
-            matches = nil
         end
+        why = nil
+        matches = nil
     elseif not maI then
         if resolvedTransport and resolvedTransport.toMaI then
-            maI = transportResolvedMaI or resolvedTransport.toMaI
+            if singleNodeTransport then
+                maI = transportResolvedMaI or resolvedTransport.toMaI
+            else
+                maI = resolvedTransport.toMaI
+            end
             why = nil
         else
             why = transportWhy or why
@@ -9850,13 +10074,18 @@ SlashHandler = function(msg)
         local idx = tonumber(msg:match("^routeknown%s+(%d+)$"))
         RouteToKnownLocation(idx)
     else
-        local parsed, parseWhy = CW.ParseZoneAndCoordsFromSlashArgs(rawMsg)
-        if parsed then
-            CW.AddWaypointFromZoneCoords(parsed.zoneName, parsed.zx, parsed.zy)
-        elseif parseWhy == "coords-out-of-range" then
-            pr("zone coordinates out of range: expected 0-100 values")
+        local currentMapParsed, currentMapWhy = CW.ParseCurrentMapCoordsFromSlashArgs(rawMsg)
+        if currentMapParsed then
+            CW.AddWaypointOnCurrentMapCoords(currentMapParsed.zx, currentMapParsed.zy)
         else
-            pr("unknown command: " .. tostring(msg))
+            local parsed, parseWhy = CW.ParseZoneAndCoordsFromSlashArgs(rawMsg)
+            if parsed then
+                CW.AddWaypointFromZoneCoords(parsed.zoneName, parsed.zx, parsed.zy)
+            elseif currentMapWhy == "coords-out-of-range" or parseWhy == "coords-out-of-range" then
+                pr("zone coordinates out of range: expected 0-100 values")
+            else
+                pr("unknown command: " .. tostring(msg))
+            end
         end
     end
 end

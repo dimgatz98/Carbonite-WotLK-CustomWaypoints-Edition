@@ -92,11 +92,15 @@ This repo bundles a **Wrath-era (3.3.5a)** Carbonite tree with **CustomWaypoints
 ### Deep Mode (Experimental)
 - Custom graph-based routing (Dijkstra-style)
 - Uses learned transports and extended graph
-- May produce unexpected fallbacks
+- Some times it can produce stutters
+
+> ⚠️ Note: In deep routing, there may be stutters while changing zones if auto route is active. 
 
 > ⚠️ Note: There may be stuttering when the addon is used alongside Questie.
 
 > ⚠️ Note: Routes shown while flying with Flight Master may not be reliable. User experience is prioritized at this point.
+
+> ⚠️ Note: Routes shown while traversing zones' borders may be broken for few steps.
 
 ## Map Data Collection
 CustomWaypoints isn’t just about routing — it’s also an ongoing effort to build a reliable, community-driven dataset of map knowledge across WotLK.
