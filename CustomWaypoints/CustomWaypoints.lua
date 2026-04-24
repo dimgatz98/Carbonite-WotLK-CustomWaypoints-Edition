@@ -1,4 +1,4 @@
--- ============================================================================
+﻿-- ============================================================================
 -- CustomWaypoints - Phase 5B (patched UI + safer deep fallback)
 --
 -- PURPOSE
@@ -90,7 +90,7 @@ local DEFAULTS = {
     useIntercontinentalRouting = true,
     useFlightMasters = true,
     hasFlyingMount = false,
-    simplifyTransitWaypoints = true,
+    simplifyTransitWaypoints = false,
     showUi = true,
     uiScale = 1,
     transportDiscoveryEnabled = false,
@@ -2563,6 +2563,10 @@ local function BuildExpandedRoute()
         totalCost = 0,
         explored = 0,
         points = {},
+        -- Cached route origin used by lightweight world-context refresh guards.
+        -- Zone/subzone changes should not rebuild deep routes unless the player
+        -- has actually left the cached first-leg context.
+        startPoint = CloneWorldPoint(current),
     }
 
     for q = 1, #STATE.db.destinations do
@@ -2678,6 +2682,59 @@ local function BuildSyncPoints(routePoints)
     end
 
     return out
+end
+
+function CW.ShouldRefreshRouteForWorldContextChange(event)
+    EnsureDb()
+    local destinations = STATE.db and STATE.db.destinations or {}
+    if #destinations == 0 then return false, "empty-queue" end
+
+    local route = STATE.expandedRoute
+    if not (route and type(route.points) == "table" and #route.points > 0) then
+        return true, "no-cached-route"
+    end
+
+    local player = GetPlayerWorldPos()
+    if not player then
+        -- A rebuild would likely fail with no-player-pos; keep the existing targets.
+        return false, "no-player-position"
+    end
+
+    local start = route.startPoint
+    if not start then
+        return true, "missing-cached-start"
+    end
+
+    if (player.instance and not start.instance) or (start.instance and not player.instance) then
+        return true, "instance-context-changed"
+    end
+
+    local playerMaI = tonumber(player.maI)
+    local startMaI = tonumber(start.maI)
+    if playerMaI and startMaI and playerMaI ~= startMaI then
+        return true, format("carbonite-map-id-changed: %s -> %s", tostring(startMaI), tostring(playerMaI))
+    end
+
+    -- Intentional: do not treat walking direction, first-leg deviation, or
+    -- waypoint progress as reroute signals. Zone/subzone events are cheap UI
+    -- context changes unless Carbonite reports a different map id / instance
+    -- context. This keeps deep mode from rebuilding while the user simply moves.
+    return false, "same Carbonite map id/context"
+end
+
+function CW.RefreshRouteForWorldContextChange(event, reason)
+    local shouldRefresh, why = CW.ShouldRefreshRouteForWorldContextChange(event)
+    if not shouldRefresh then
+        dbg("world-context route refresh skipped (" .. tostring(event) .. "): " .. tostring(why))
+        return false
+    end
+
+    InvalidateRoute(reason or tostring(event or "world context changed"))
+    if STATE.db and STATE.db.autoSyncToCarbonite then
+        SyncQueueToCarbonite(true)
+    end
+    dbg("world-context route refresh ran (" .. tostring(event) .. "): " .. tostring(why))
+    return true
 end
 
 local function SanitizeCarboniteLabel(s)
@@ -8940,7 +8997,7 @@ function BuildSouthKalimdorFallbackLeg(startPoint, destPoint, why)
     }
 end
 
-SyncQueueToCarbonite = function(skipIfUnchanged)
+SyncQueueToCarbonite = function(skipIfUnchanged, routeOverride)
     local map = GetMap()
     if not map then
         pr("sync failed: Carbonite map not ready")
@@ -8968,7 +9025,10 @@ SyncQueueToCarbonite = function(skipIfUnchanged)
         previousSignature = tostring(STATE.lastCarboniteSyncSignature or "")
     end
 
-    local route, why = BuildExpandedRoute()
+    local route, why = routeOverride, nil
+    if not route then
+        route, why = BuildExpandedRoute()
+    end
     if not route then
         pr("route rebuild failed: " .. tostring(why))
         return false
@@ -9508,9 +9568,8 @@ local function AdvanceCurrentRouteTarget(reason)
         return true
     end
 
+    local cachedRoute = STATE.expandedRoute
     STATE.deepSyncSkipCount = (tonumber(STATE.deepSyncSkipCount) or 0) + 1
-    STATE.expandedRoute = nil
-    STATE.graph = nil
 
     if reason == "manual-pop" or reason == "undoable-pop" then
         pr(format("advanced current route node => %s (reason=%s)",
@@ -9523,7 +9582,11 @@ local function AdvanceCurrentRouteTarget(reason)
     end
 
     if STATE.db.autoSyncToCarbonite then
-        SyncQueueToCarbonite()
+        if cachedRoute and type(cachedRoute.points) == "table" then
+            SyncQueueToCarbonite(nil, cachedRoute)
+        else
+            SyncQueueToCarbonite()
+        end
     end
     return true
 end
@@ -9812,8 +9875,8 @@ function CW.HookCarboniteClear()
 
         local reachedYards = GetReachedFirstWaypointDistanceYards()
         if STATE.db.autoAdvance and reachedYards then
-            dbg(format("Carbonite clear near reached waypoint; advancing queue instead of clearing all (%.1f yards)", reachedYards))
-            RemoveFirstWaypoint(format("Carbonite clear %.1f yards", reachedYards))
+            dbg(format("Carbonite clear near reached waypoint; advancing current route target instead of clearing all (%.1f yards)", reachedYards))
+            AdvanceCurrentRouteTarget(format("Carbonite clear %.1f yards", reachedYards))
             return
         end
 
@@ -10049,6 +10112,7 @@ function CW.CollectKnownDestinationSearchCandidates(candidates, query)
                 mapName = dest.mapName or entry.mapName,
                 destination = dest,
                 routePointCount = pointCount,
+                routePoints = (kind == "route" and type(entry.routePoints) == "table") and entry.routePoints or nil,
             },
                 entry.name,
                 entry.label,
@@ -10248,10 +10312,29 @@ function CW.RouteToDestinationSearchCandidate(candidate, query)
     dest.userLabel = dest.userLabel or tostring(candidate.kind or "search")
     dest.label = dest.label or tostring(candidate.name or query)
 
+    local routePoints = nil
+    if candidate.kind == "route" and type(candidate.routePoints) == "table" and #candidate.routePoints > 0 then
+        routePoints = CloneDestinations(candidate.routePoints)
+        if routePoints and routePoints[1] then
+            routePoints[1].ts = routePoints[1].ts or dest.ts
+            routePoints[1].userName = routePoints[1].userName or dest.userName
+            routePoints[1].userLabel = routePoints[1].userLabel or dest.userLabel or "route-start"
+            routePoints[1].label = routePoints[1].label or dest.label
+        end
+    end
+
     local wasEmpty = #(STATE.db.destinations or {}) == 0
     PushHistorySnapshot("route-destination-search")
     wipe(STATE.db.destinations)
-    tinsert(STATE.db.destinations, dest)
+
+    if routePoints and #routePoints > 0 then
+        for i = 1, #routePoints do
+            tinsert(STATE.db.destinations, routePoints[i])
+        end
+    else
+        tinsert(STATE.db.destinations, dest)
+    end
+
     HandleQueueBecameNonEmpty("route-destination-search", wasEmpty)
 
     InvalidateRoute("destination search")
@@ -10260,15 +10343,14 @@ function CW.RouteToDestinationSearchCandidate(candidate, query)
         SyncQueueToCarbonite()
     end
 
-    if candidate.kind == "route" and (candidate.routePointCount or 0) > 1 then
-        pr(format("routing to start of known route: %s (stop 1/%d)", tostring(candidate.name or query), candidate.routePointCount or 0))
+    if routePoints and #routePoints > 1 then
+        pr(format("routing to matched known route: %s (%d stop(s), starting at stop 1)", tostring(candidate.name or query), #routePoints))
     else
         pr(format("routing to destination match: %s", CW.FormatDestinationSearchCandidate(candidate)))
     end
 
     return true
 end
-
 function CW.TryRouteByDestinationKeyword(query)
     local candidates = CW.SearchDestinationKeyword(query)
     if not candidates or #candidates == 0 then
@@ -10497,10 +10579,7 @@ function OnEvent(_, event)
         ScheduleLoginQueueSyncIfNeeded()
         EnsureCarboniteMapButtons()
         if STATE.db and #(STATE.db.destinations or {}) > 0 then
-            InvalidateRoute("player entering world")
-            if STATE.db.autoSyncToCarbonite then
-                SyncQueueToCarbonite()
-            end
+            CW.RefreshRouteForWorldContextChange(event, "player entering world")
         end
         local eventFrom = STATE.lastStablePlayerPos
         local eventCurrent = GetPlayerWorldPos()
@@ -10520,10 +10599,7 @@ function OnEvent(_, event)
             dbg("zone-change autoroute suppressed: player on taxi (" .. tostring(event) .. ")")
         else
             if STATE.db and #(STATE.db.destinations or {}) > 0 then
-                InvalidateRoute("zone changed")
-                if STATE.db.autoSyncToCarbonite then
-                    SyncQueueToCarbonite()
-                end
+                CW.RefreshRouteForWorldContextChange(event, "zone changed")
             end
 
             local eventFrom = STATE.lastStablePlayerPos
