@@ -1,4 +1,4 @@
-﻿-- ============================================================================
+-- ============================================================================
 -- CustomWaypoints - Phase 5B (patched UI + safer deep fallback)
 --
 -- PURPOSE
@@ -33,11 +33,9 @@ local huge = math.huge
 local lower = string.lower
 local match = string.match
 local band = bit.band
-local ShowWaypointMetadataPopup
 local ShowKnownLocationEditorPopup
 local SaveQueueAsKnownRoute
 local AddLabeledCurrentCursorWaypoint
-local AddCurrentLocationWaypoint
 local AddCurrentLocationWithMetadataPopup
 local EnsureCarboniteMapButtons
 local routeSelectedBtn
@@ -140,6 +138,9 @@ local function ClearPendingTransport()
 end
 
 local function RefreshUiHeader()
+    if not STATE.db and EnsureDb then
+        EnsureDb()
+    end
     local db = STATE.db or {}
     if STATE.ui and STATE.ui.header then
         STATE.ui.header:SetText("CW options")
@@ -3112,10 +3113,6 @@ end
 local function ColorizeEdgeName(edgeType, textLabel)
     local color = EDGE_COLORS[edgeType or ""] or "|cffdddddd"
     return color .. tostring(textLabel or edgeType or "route") .. "|r"
-end
-
-local function BuildLegendText()
-    return ""
 end
 
 local function ApplyRoutingTuningChange(key, value, skipUiRefresh, skipSync)
@@ -7329,11 +7326,11 @@ GetPlayerWorldPos = function()
         if continent and continent > 0 and zone and zone > 0 and Nx.Map.CZ2I[continent] and Nx.Map.CZ2I[continent][zone] then
             local maI = Nx.Map.CZ2I[continent][zone]
             if map.GRMI then
-                local ok, resolvedMaI = pcall(map.GRMI, map)
-                if ok and tonumber(resolvedMaI) and tonumber(resolvedMaI) > 0 then
-                    maI = tonumber(resolvedMaI)
-                end
+            local ok, resolvedMaI = pcall(map.GRMI, map)
+            if ok and tonumber(resolvedMaI) and tonumber(resolvedMaI) > 0 then
+                maI = tonumber(resolvedMaI)
             end
+        end
 
             local px, py = GetPlayerMapPosition("player")
 
@@ -7343,19 +7340,19 @@ GetPlayerWorldPos = function()
 
             if px and py and not (px == 0 and py == 0) then
                 local wx, wy = map:GWP(maI, px * 100, py * 100)
-                return {
-                    maI = maI,
-                    wx = wx,
-                    wy = wy,
-                    zx = px * 100,
-                    zy = py * 100,
-                    mapName = map.ITN and map:ITN(maI) or ("Map " .. tostring(maI)),
-                    instance = inInstance,
-                    instanceType = instanceType,
-                    zoneText = zoneText,
-                    subZoneText = subZoneText,
-                }
-            end
+        return {
+            maI = maI,
+            wx = wx,
+            wy = wy,
+            zx = px * 100,
+            zy = py * 100,
+            mapName = map.ITN and map:ITN(maI) or ("Map " .. tostring(maI)),
+            instance = inInstance,
+            instanceType = instanceType,
+            zoneText = zoneText,
+            subZoneText = subZoneText,
+        }
+    end
         else
             if oldCont and oldZone and SetMapZoom then
                 pcall(SetMapZoom, oldCont, oldZone)
@@ -9415,7 +9412,11 @@ AddCurrentLocationWaypoint = function()
 end
 
 AddCurrentLocationWithMetadataPopup = function()
+    EnsureDb()
     local dest = GetPlayerWorldPos()
+    if not dest and STATE.lastStablePlayerPos then
+        dest = CloneWorldPoint(STATE.lastStablePlayerPos)
+    end
     if not dest then
         pr("savehere failed: no player position")
         return
@@ -9931,6 +9932,360 @@ function CW.DebugFlightMaster(name)
     pr("---- FM DEBUG END ----")
 end
 
+function CW.TrimDestinationSearchText(value)
+    local s = tostring(value or "")
+    s = gsub(s, "^%s+", "")
+    s = gsub(s, "%s+$", "")
+    return s
+end
+
+function CW.DestinationSearchMatchScore(query, ...)
+    local q = CW.NormalizeZoneLookupKey(query)
+    if not q or q == "" or #q < 2 then return nil end
+
+    local best = nil
+    for i = 1, select("#", ...) do
+        local raw = select(i, ...)
+        local key = CW.NormalizeZoneLookupKey(raw)
+        if key and key ~= "" then
+            local score = nil
+            if key == q then
+                score = 1000
+            elseif string.find(key, "^" .. q) ~= nil then
+                score = 850
+            elseif string.find(key, q, 1, true) ~= nil then
+                score = 700
+            elseif #key >= 4 and string.find(q, key, 1, true) ~= nil then
+                score = 560
+            else
+                local allTokens = true
+                for token in string.gmatch(q, "%S+") do
+                    if not string.find(key, token, 1, true) then
+                        allTokens = false
+                        break
+                    end
+                end
+                if allTokens then
+                    score = 620
+                end
+            end
+
+            if score and (not best or score > best) then
+                best = score
+            end
+        end
+    end
+
+    return best
+end
+
+function CW.AddDestinationSearchCandidate(candidates, query, sourcePriority, candidate, ...)
+    if not (type(candidates) == "table" and candidate and candidate.destination) then return end
+    local score = CW.DestinationSearchMatchScore(query, ...)
+    if not score then return end
+
+    candidate.score = score + (sourcePriority or 0)
+    candidate.sourcePriority = sourcePriority or 0
+    candidates[#candidates + 1] = candidate
+end
+
+function CW.FormatDestinationSearchCandidate(candidate)
+    if not candidate then return "?" end
+    local dest = candidate.destination or {}
+    local loc = tostring(dest.mapName or candidate.mapName or "?")
+    if dest.zx and dest.zy then
+        loc = format("%s %.1f %.1f", loc, dest.zx or -1, dest.zy or -1)
+    end
+    return format("%s [%s/%s] → %s",
+        tostring(candidate.name or "?"),
+        tostring(candidate.sourceType or "?"),
+        tostring(candidate.kind or "?"),
+        loc)
+end
+
+function CW.PrintDestinationSearchAmbiguity(query, candidates)
+    local parts = {}
+    local limit = math.min(#candidates, 5)
+    for i = 1, limit do
+        parts[#parts + 1] = CW.FormatDestinationSearchCandidate(candidates[i])
+    end
+    if #candidates > limit then
+        parts[#parts + 1] = "+" .. tostring(#candidates - limit) .. " more"
+    end
+    pr("destination match ambiguous: " .. tostring(query) .. " → " .. table.concat(parts, "; "))
+end
+
+function CW.CollectKnownDestinationSearchCandidates(candidates, query)
+    EnsureDb()
+
+    local entries = BuildKnownLocationEntries()
+    for _, entry in ipairs(entries or {}) do
+        local dest = nil
+        local pointCount = 0
+        local kind = tostring(entry.kind or "known")
+
+        if kind == "route" and type(entry.routePoints) == "table" and #entry.routePoints > 0 then
+            pointCount = #entry.routePoints
+            dest = CloneDestination(entry.routePoints[1])
+            if dest then
+                dest.label = dest.label or ("Start of route: " .. tostring(entry.name or "known route"))
+                dest.userName = dest.userName or tostring(entry.name or "known route")
+                dest.userLabel = dest.userLabel or "route-start"
+            end
+        else
+            dest = CloneDestination(entry.destination or entry.lastTarget or entry.previousTarget)
+            if dest then
+                dest.label = dest.label or tostring(entry.name or entry.label or "known location")
+                dest.userName = dest.userName or tostring(entry.name or entry.label or "known location")
+                dest.userLabel = dest.userLabel or tostring(entry.transportKind or kind)
+            end
+        end
+
+        if dest then
+            CW.AddDestinationSearchCandidate(candidates, query, kind == "route" and 80 or 70, {
+                sourceType = kind == "route" and "knownRoute" or "knownLocation",
+                kind = kind,
+                name = tostring(entry.name or entry.label or dest.userName or dest.mapName or "Known location"),
+                mapName = dest.mapName or entry.mapName,
+                destination = dest,
+                routePointCount = pointCount,
+            },
+                entry.name,
+                entry.label,
+                entry.description,
+                entry.mapName,
+                entry.transportKind,
+                dest.userName,
+                dest.userLabel,
+                dest.zoneText,
+                dest.subZoneText,
+                dest.mapName)
+        end
+    end
+end
+
+function CW.DecodeCarboniteFavoriteDestination(typ, dat)
+    if not (Nx and Nx.Fav and dat) then return nil end
+
+    local maI, zx, zy
+    if typ == "N" and type(Nx.Fav.PIN) == "function" then
+        local ok, _, id, x, y = pcall(function() return Nx.Fav:PIN(dat) end)
+        if ok then
+            maI, zx, zy = id, x, y
+        end
+    elseif (typ == "T" or typ == "t") and type(Nx.Fav.PIT) == "function" then
+        local ok, id, x, y = pcall(function() return Nx.Fav:PIT(dat) end)
+        if ok then
+            maI, zx, zy = id, x, y
+        end
+    end
+
+    if not (maI and zx and zy) then return nil end
+    return BuildPointFromAnchor(maI, zx, zy, nil, "connector")
+end
+
+function CW.CollectCarboniteFavoriteCandidates(candidates, query)
+    if not (NxData and type(NxData.NXFav) == "table" and Nx and Nx.Fav and type(Nx.Fav.PaI1) == "function") then
+        return
+    end
+
+    local function scanFolder(folder, folderPath)
+        if type(folder) ~= "table" then return end
+        for _, item in ipairs(folder) do
+            if type(item) == "table" then
+                scanFolder(item, tostring(folderPath or "") .. " " .. tostring(item.Name or ""))
+            elseif type(item) == "string" then
+                local ok, typ, _, nam, dat = pcall(function() return Nx.Fav:PaI1(item) end)
+                if ok and (typ == "N" or typ == "T" or typ == "t") then
+                    local dest = CW.DecodeCarboniteFavoriteDestination(typ, dat)
+                    if dest then
+                        dest.label = dest.label or tostring(nam or "Carbonite favorite")
+                        dest.userName = dest.userName or tostring(nam or "Carbonite favorite")
+                        dest.userLabel = dest.userLabel or (typ == "N" and "carbonite-note" or "carbonite-target")
+                        CW.AddDestinationSearchCandidate(candidates, query, 55, {
+                            sourceType = "carboniteFavorite",
+                            kind = typ == "N" and "note" or "target",
+                            name = tostring(nam or "Carbonite favorite"),
+                            mapName = dest.mapName,
+                            destination = dest,
+                        }, nam, folderPath, dest.mapName, dest.zoneText, dest.subZoneText)
+                    end
+                end
+            end
+        end
+    end
+
+    scanFolder(NxData.NXFav, "")
+end
+
+function CW.AddCarboniteGuidePointCandidate(candidates, query, guideType, name, maI, zx, zy, extraText)
+    if not (maI and zx and zy) then return end
+
+    local dest = BuildPointFromAnchor(maI, zx, zy, tostring(name or guideType), "connector")
+    if not dest then return end
+
+    dest.userName = dest.userName or tostring(name or guideType or "Carbonite guide")
+    dest.userLabel = dest.userLabel or tostring(guideType or "guide")
+    dest.zoneText = dest.zoneText or dest.mapName
+    dest.subZoneText = dest.subZoneText or dest.mapName
+
+    CW.AddDestinationSearchCandidate(candidates, query, 25, {
+        sourceType = "carboniteGuide",
+        kind = tostring(guideType or "guide"),
+        name = tostring(name or guideType or "Carbonite guide"),
+        mapName = dest.mapName,
+        destination = dest,
+    }, name, guideType, extraText, dest.mapName, dest.zoneText, dest.subZoneText)
+end
+
+function CW.CollectCarboniteGuideCandidates(candidates, query)
+    if not (Nx and Nx.GuD and Nx.Map and Nx.Que and type(Nx.GuD) == "table") then
+        return
+    end
+
+    local mapObject = GetMap()
+    local mapApi = Nx.Map
+    local que = Nx.Que
+    local hiF = UnitFactionGroup and UnitFactionGroup("player") == "Horde" and 1 or 2
+
+    for guideType, byContinent in pairs(Nx.GuD) do
+        if type(byContinent) == "table" then
+            for _, daS in pairs(byContinent) do
+                if type(daS) == "string" and #daS > 0 then
+                    local mod1 = string.byte(daS, 1)
+                    if mod1 == 32 then
+                        local n = 2
+                        while n + 5 <= #daS do
+                            local fac2 = (string.byte(daS, n) or 35) - 35
+                            if fac2 ~= hiF then
+                                local zon = (string.byte(daS, n + 1) or 35) - 35
+                                local maI = (mapApi.NTMI and mapApi.NTMI[zon]) or (Nx.NTMI and Nx.NTMI[zon])
+                                local loc = string.sub(daS, n + 2, n + 5)
+                                local ok, zx, zy = pcall(function() return que:UnL(loc, true) end)
+                                if ok and maI and zx and zy then
+                                    local mapName = (mapObject and mapObject.ITN and mapObject:ITN(maI)) or (Nx.MITN and Nx.MITN[maI])
+                                    CW.AddCarboniteGuidePointCandidate(candidates, query, guideType, tostring(guideType), maI, zx, zy, mapName)
+                                end
+                            end
+                            n = n + 6
+                        end
+                    elseif mod1 ~= 33 then
+                        local n = 1
+                        while n + 1 <= #daS do
+                            local b1 = string.byte(daS, n)
+                            local b2 = string.byte(daS, n + 1)
+                            if b1 and b2 then
+                                local npI = (b1 - 35) * 221 + (b2 - 35)
+                                local npS = Nx.NPCD and Nx.NPCD[npI]
+                                if type(npS) == "string" and #npS > 1 then
+                                    local fac2 = (string.byte(npS, 1) or 35) - 35
+                                    if fac2 ~= hiF then
+                                        local oSt = string.sub(npS, 2)
+                                        local ok, des1, zon, loc = pcall(function() return que:UnO(oSt) end)
+                                        if ok and des1 and zon and loc then
+                                            local maI = (mapApi.NTMI and mapApi.NTMI[zon]) or (Nx.NTMI and Nx.NTMI[zon])
+                                            if maI and string.byte(oSt, loc) == 32 then
+                                                loc = loc + 1
+                                                local cnt = math.floor((#oSt - loc + 1) / 4)
+                                                local cleanName = gsub(tostring(des1), "!", ", ")
+                                                local compactName = gsub(tostring(des1), "!", " ")
+                                                local loN1 = loc
+                                                while loN1 <= loc + cnt * 4 - 1 do
+                                                    local lo1 = string.sub(oSt, loN1, loN1 + 3)
+                                                    local ok2, zx, zy = pcall(function() return que:UnL(lo1, true) end)
+                                                    if ok2 and zx and zy then
+                                                        CW.AddCarboniteGuidePointCandidate(candidates, query, guideType, cleanName, maI, zx, zy, compactName)
+                                                    end
+                                                    loN1 = loN1 + 4
+                                                end
+                                            end
+                                        end
+                                    end
+                                end
+                            end
+                            n = n + 2
+                        end
+                    end
+                end
+            end
+        end
+    end
+end
+
+function CW.SearchDestinationKeyword(query)
+    local clean = CW.TrimDestinationSearchText(query)
+    if clean == "" or #CW.NormalizeZoneLookupKey(clean) < 2 then
+        return {}
+    end
+
+    local candidates = {}
+    CW.CollectKnownDestinationSearchCandidates(candidates, clean)
+    CW.CollectCarboniteFavoriteCandidates(candidates, clean)
+    CW.CollectCarboniteGuideCandidates(candidates, clean)
+
+    table.sort(candidates, function(a, b)
+        if (a.score or 0) ~= (b.score or 0) then
+            return (a.score or 0) > (b.score or 0)
+        end
+        return tostring(a.name or "") < tostring(b.name or "")
+    end)
+
+    return candidates
+end
+
+function CW.RouteToDestinationSearchCandidate(candidate, query)
+    if not (candidate and candidate.destination) then return false end
+
+    EnsureDb()
+    local dest = CloneDestination(candidate.destination)
+    if not dest then
+        pr("destination match has no usable point: " .. tostring(candidate.name or query))
+        return false
+    end
+
+    dest.ts = date("%Y-%m-%d %H:%M:%S")
+    dest.userName = dest.userName or tostring(candidate.name or query)
+    dest.userLabel = dest.userLabel or tostring(candidate.kind or "search")
+    dest.label = dest.label or tostring(candidate.name or query)
+
+    local wasEmpty = #(STATE.db.destinations or {}) == 0
+    PushHistorySnapshot("route-destination-search")
+    wipe(STATE.db.destinations)
+    tinsert(STATE.db.destinations, dest)
+    HandleQueueBecameNonEmpty("route-destination-search", wasEmpty)
+
+    InvalidateRoute("destination search")
+    RefreshUiHeader()
+    if STATE.db.autoSyncToCarbonite then
+        SyncQueueToCarbonite()
+    end
+
+    if candidate.kind == "route" and (candidate.routePointCount or 0) > 1 then
+        pr(format("routing to start of known route: %s (stop 1/%d)", tostring(candidate.name or query), candidate.routePointCount or 0))
+    else
+        pr(format("routing to destination match: %s", CW.FormatDestinationSearchCandidate(candidate)))
+    end
+
+    return true
+end
+
+function CW.TryRouteByDestinationKeyword(query)
+    local candidates = CW.SearchDestinationKeyword(query)
+    if not candidates or #candidates == 0 then
+        return false, "not-found"
+    end
+
+    local best = candidates[1]
+    local second = candidates[2]
+    if second and (second.score or 0) == (best.score or 0) then
+        CW.PrintDestinationSearchAmbiguity(query, candidates)
+        return true, "ambiguous"
+    end
+
+    CW.RouteToDestinationSearchCandidate(best, query)
+    return true, nil
+end
+
 SlashHandler = function(msg)
     local rawMsg = (msg or ""):gsub("^%s+", ""):gsub("%s+$", "")
     local debugFmArg = rawMsg:match("^[Dd][Ee][Bb][Uu][Gg][Ff][Mm]%s+(.+)$")
@@ -10084,7 +10439,10 @@ SlashHandler = function(msg)
             elseif currentMapWhy == "coords-out-of-range" or parseWhy == "coords-out-of-range" then
                 pr("zone coordinates out of range: expected 0-100 values")
             else
-                pr("unknown command: " .. tostring(msg))
+                local handled = CW.TryRouteByDestinationKeyword(rawMsg)
+                if not handled then
+                    pr("unknown command: " .. tostring(msg))
+                end
             end
         end
     end
