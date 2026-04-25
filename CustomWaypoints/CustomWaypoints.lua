@@ -4299,14 +4299,6 @@ local function ResolveKnownLocationStoredSourceIndex(entry)
     return nil
 end
 
-local function SanitizeRoutePointsForEditing(routePoints)
-    local out = {}
-    for i, pt in ipairs(routePoints or {}) do
-        out[i] = SanitizeRoutePointForEditing(pt)
-    end
-    return out
-end
-
 local function PushHistorySnapshot(reason)
     STATE.history = STATE.history or {}
     STATE.future = STATE.future or {}
@@ -4662,18 +4654,6 @@ CloneLearnedTransport = function(edge)
         copy[k] = v
     end
     return copy
-end
-
-local function FindDuplicateLearnedTransportIndex(candidate, skipIndex)
-    local wanted = LearnedTransportKey(candidate)
-    if not wanted then return nil end
-    local learned = EnsureTransportDb() or {}
-    for i, edge in ipairs(learned) do
-        if i ~= skipIndex and LearnedTransportKey(edge) == wanted then
-            return i
-        end
-    end
-    return nil
 end
 
 local function ShowKnownPointEditorPopup(sourceIndex, loc, titleText)
@@ -10070,9 +10050,7 @@ function CW.FormatDestinationSearchCandidate(candidate)
     if dest.zx and dest.zy then
         loc = format("%s %.1f %.1f", loc, dest.zx or -1, dest.zy or -1)
     end
-    return format("%s [%s/%s] -> %s",
-        tostring(candidate.name or "?"),
-        tostring(candidate.sourceType or "?"),
+    return format("%s (%s)",
         tostring(candidate.kind or "?"),
         loc)
 end
@@ -10396,6 +10374,24 @@ function CW.SetDestinationSearchPage(page)
     CW.RefreshDestinationSearchFrame()
 end
 
+local function FormatSecondsHms(seconds)
+    local function fmt(n)
+        if n < 10 then return "0" .. tostring(n) end
+        return tostring(n)
+    end
+
+    seconds = tonumber(seconds)
+    if not seconds or seconds < 0 then return "??:??:??" end
+
+    seconds = math.floor(seconds + 0.5)
+
+    local h = math.floor(seconds / 3600)
+    local m = math.floor((seconds % 3600) / 60)
+    local s = seconds % 60
+
+    return fmt(h) .. "h" .. fmt(m) .. "m" .. fmt(s) .. "s"
+end
+
 function CW.RefreshDestinationSearchFrame()
     local ui = STATE.destinationSearchUi
     if not (ui and ui.content) then return end
@@ -10538,7 +10534,7 @@ function CW.RefreshDestinationSearchFrame()
         meta:SetPoint("TOPLEFT", title, "BOTTOMLEFT", 0, -4)
         meta:SetWidth(510)
         meta:SetJustifyH("LEFT")
-        meta:SetText(format("score=%s | %s", tostring(candidate.score or "?"), CW.FormatDestinationSearchCandidate(candidate)))
+        meta:SetText(format("%s | %s", FormatSecondsHms(candidate.score or "?"), CW.FormatDestinationSearchCandidate(candidate)))
 
         local routeBtn = CreateFrame("Button", nil, row, "UIPanelButtonTemplate")
         routeBtn:SetWidth(82)
@@ -10557,6 +10553,7 @@ function CW.RefreshDestinationSearchFrame()
 
     content:SetHeight(math.max(44, visibleCount * 52 + 12))
 end
+
 function CW.SubmitDestinationSearchFrame()
     local ui = STATE.destinationSearchUi
     if not ui then return end
