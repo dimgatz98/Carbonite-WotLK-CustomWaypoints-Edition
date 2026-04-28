@@ -2815,6 +2815,75 @@ local function BuildTransportLeg(startPoint, destPoint)
         })
     end
 
+    -- If a multi-leg graph path reaches a flyable expansion region (for example
+    -- by portal/boat from a non-flyable old-world waypoint), do not keep using
+    -- ground-walk/connector edges inside that flyable region. The direct-flying
+    -- fast path only runs for the original leg endpoints, so optimize the tail
+    -- here using the cheapest graph point from which the destination can be
+    -- reached by legitimate flying. Transport-only map-layer transitions
+    -- (Dalaran -> Underbelly, etc.) remain blocked by
+    -- CW.CanUseCapabilityDirectFlyingLeg().
+    local function optimizeFlyingTail()
+        if not (route and route.points and destPoint) then return end
+        local pts = route.points
+        if #pts < 3 then return end
+
+        local bestIndex, bestCost, bestFlyCost
+        local prefixCost = 0
+        for i = 1, #pts - 1 do
+            if i > 1 then
+                prefixCost = prefixCost + (tonumber(pts[i].cost) or 0)
+            end
+
+            local pt = pts[i]
+            if pt and CW.CanUseCapabilityDirectFlyingLeg(pt, destPoint) then
+                local flyCost = CW.DirectFlyingCostSeconds(pt.wx, pt.wy, destPoint.wx, destPoint.wy)
+                local total = prefixCost + flyCost
+                if total < (bestCost or huge) then
+                    bestIndex = i
+                    bestCost = total
+                    bestFlyCost = flyCost
+                end
+            end
+        end
+
+        local currentCost = tonumber(route.totalCost) or huge
+        if bestIndex and bestCost and bestCost + 1 < currentCost then
+            local newPoints = {}
+            for i = 1, bestIndex do
+                newPoints[#newPoints + 1] = pts[i]
+            end
+
+            local map = GetMap()
+            local zx, zy = destPoint.zx, destPoint.zy
+            if map and map.GZP then
+                local ok, mzx, mzy = pcall(map.GZP, map, destPoint.maI, destPoint.wx, destPoint.wy)
+                if ok and mzx and mzy then
+                    zx, zy = mzx, mzy
+                end
+            end
+
+            newPoints[#newPoints + 1] = {
+                maI = destPoint.maI,
+                wx = destPoint.wx,
+                wy = destPoint.wy,
+                zx = zx,
+                zy = zy,
+                mapName = destPoint.mapName,
+                edgeType = "fly",
+                label = destPoint.userName or destPoint.mapName or "Fly",
+                cost = bestFlyCost,
+                forceStraight = true,
+            }
+
+            route.points = newPoints
+            route.totalCost = bestCost
+            route.flyingTailOptimized = true
+        end
+    end
+
+    optimizeFlyingTail()
+
     if STATE.db and STATE.db.simplifyTransitWaypoints then
         route.points = CollapseMinimalTransitNoise(CollapseDeepTaxiChains(route.points))
     else
