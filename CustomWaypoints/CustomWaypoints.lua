@@ -1,4 +1,4 @@
-﻿-- ============================================================================
+-- ============================================================================
 -- CustomWaypoints - Phase 5B (patched UI + safer deep fallback)
 --
 -- PURPOSE
@@ -51,6 +51,7 @@ local TARGET_TYPE_GOTO = "Goto"
 local TARGET_TYPE_STRAIGHT = "CW_STRAIGHT"
 
 local STRAIGHT_EDGE_TYPES = {
+    flying = true,
     boat = true,
     zeppelin = true,
     tram = true,
@@ -89,7 +90,6 @@ local DEFAULTS = {
     walkYardsPerSecond = 7,
     useIntercontinentalRouting = true,
     useFlightMasters = true,
-    hasFlyingMount = false,
     simplifyTransitWaypoints = false,
     showUi = true,
     uiScale = 1,
@@ -116,8 +116,6 @@ local ROUTING_TUNING_DEFAULTS = {
     flightMasterBoardingSeconds = 20,
     flightMasterSpeedYardsPerSecond = 15,
     flightMasterLandingSeconds = 12,
-    -- Maximum post-portal walk distance without switching to taxi
-    maxPostPortalWalkWithoutTaxi = 700,
 }
 
 -- Merge routing tuning overrides from the saved profile with the defaults.
@@ -148,7 +146,6 @@ local function RefreshUiHeader()
             STATE.ui.legend:Hide()
         end
         if STATE.ui.checks then
-            if STATE.ui.checks.flying and STATE.ui.checks.flying.SetChecked then STATE.ui.checks.flying:SetChecked(not db.hasFlyingMount and true or false) end
             if STATE.ui.checks.autosync and STATE.ui.checks.autosync.SetChecked then STATE.ui.checks.autosync:SetChecked(db.autoSyncToCarbonite and true or false) end
             if STATE.ui.checks.autoadvance and STATE.ui.checks.autoadvance.SetChecked then STATE.ui.checks.autoadvance:SetChecked(db.autoAdvance and true or false) end
             if STATE.ui.checks.flightmasters and STATE.ui.checks.flightmasters.SetChecked then STATE.ui.checks.flightmasters:SetChecked(db.useFlightMasters and true or false) end
@@ -164,7 +161,6 @@ local function RefreshUiHeader()
     if STATE.interfaceChecks then
         if STATE.interfaceChecks.autosync and STATE.interfaceChecks.autosync.SetChecked then STATE.interfaceChecks.autosync:SetChecked(db.autoSyncToCarbonite and true or false) end
         if STATE.interfaceChecks.autoadvance and STATE.interfaceChecks.autoadvance.SetChecked then STATE.interfaceChecks.autoadvance:SetChecked(db.autoAdvance and true or false) end
-        if STATE.interfaceChecks.flying and STATE.interfaceChecks.flying.SetChecked then STATE.interfaceChecks.flying:SetChecked(not db.hasFlyingMount and true or false) end
         if STATE.interfaceChecks.flightmasters and STATE.interfaceChecks.flightmasters.SetChecked then STATE.interfaceChecks.flightmasters:SetChecked(db.useFlightMasters and true or false) end
         if STATE.interfaceChecks.deep and STATE.interfaceChecks.deep.SetChecked then STATE.interfaceChecks.deep:SetChecked((not db.simplifyTransitWaypoints) and true or false) end
         if STATE.interfaceChecks.debug and STATE.interfaceChecks.debug.SetChecked then STATE.interfaceChecks.debug:SetChecked(db.debug and true or false) end
@@ -301,6 +297,110 @@ local function IsTransitSimplifiedEffective()
     return STATE.db and STATE.db.simplifyTransitWaypoints == true
 end
 
+local function SpellKnownCompat(spellId)
+    if type(IsSpellKnown) ~= "function" then return false end
+    local known = IsSpellKnown(spellId)
+    return known ~= nil and known ~= false
+end
+
+local function AchievementCompleteCompat(achievementId)
+    if type(GetAchievementInfo) ~= "function" then return false end
+    local _, _, _, completed = GetAchievementInfo(achievementId)
+    return completed ~= nil and completed ~= false
+end
+
+function CW.IsWotlk335a()
+    if type(GetBuildInfo) ~= "function" then return false end
+
+    local version, build, _, tocVersion = GetBuildInfo()
+    version = tostring(version or "")
+    build = tostring(build or "")
+
+    if build == "12340" then
+        return true
+    end
+    if version == "3.3.5a" then
+        return true
+    end
+    return version == "3.3.5" and tonumber(tocVersion) == 30300
+end
+
+function CW.ShouldUseSpellFlyingDetection()
+    return CW.IsWotlk335a() and type(IsSpellKnown) == "function"
+end
+
+function CW.GetFlyableExpansionRegion(mapId)
+    local maI = tonumber(type(mapId) == "table" and mapId.maI or mapId)
+    if not maI then return nil end
+
+    if maI >= 3000 and maI < 4000 then
+        return "outland"
+    end
+    if maI >= 4000 and maI < 5000 then
+        return "northrend"
+    end
+    return nil
+end
+
+function CW.PlayerCanFlyInRegion(mapId)
+    if not CW.ShouldUseSpellFlyingDetection() then return false end
+
+    local hasExpert = SpellKnownCompat(34090) -- Expert Riding (150%)
+    local hasArtisan = SpellKnownCompat(34091) -- Artisan Riding (280%)
+    local hasColdWeather = SpellKnownCompat(54197) -- Cold Weather Flying
+    local hasExpertAchievement = AchievementCompleteCompat(890) -- Into The Wild Blue Yonder
+    local hasArtisanAchievement = AchievementCompleteCompat(892) -- The Right Stuff
+    local hasFlying = hasExpert or hasArtisan or hasExpertAchievement or hasArtisanAchievement
+
+    local region = CW.GetFlyableExpansionRegion(mapId)
+    if region == "outland" then
+        return hasFlying == true
+    end
+    if region == "northrend" then
+        return hasFlying == true and hasColdWeather == true
+    end
+
+    return false
+end
+
+function CW.LegacyDirectFlyingEnabled()
+    -- Compatibility fallback for non-3.3.5a/API-mismatch clients that may
+    -- still have the old saved value. 3.3.5a uses spell capability instead.
+    return STATE and STATE.db and STATE.db.hasFlyingMount == true and IsTransitSimplifiedEffective()
+end
+
+function CW.CanUseCapabilityDirectFlyingLeg(startPoint, destPoint)
+    if not (startPoint and destPoint and startPoint.wx and startPoint.wy and destPoint.wx and destPoint.wy) then
+        return false
+    end
+
+    local startRegion = CW.GetFlyableExpansionRegion(startPoint)
+    local destRegion = CW.GetFlyableExpansionRegion(destPoint)
+    if not (startRegion and startRegion == destRegion) then
+        return false
+    end
+
+    if CW.ShouldUseSpellFlyingDetection() then
+        local canFly = CW.PlayerCanFlyInRegion(startPoint.maI)
+        if STATE.db and STATE.db.debug == true then
+            pr(format("fly capability: startMaI=%s destMaI=%s region=%s expert=%s artisan=%s expertAch=%s artisanAch=%s coldWeather=%s canFly=%s",
+                tostring(startPoint.maI), tostring(destPoint.maI), tostring(startRegion),
+                tostring(SpellKnownCompat(34090)), tostring(SpellKnownCompat(34091)),
+                tostring(AchievementCompleteCompat(890)), tostring(AchievementCompleteCompat(892)), tostring(SpellKnownCompat(54197)), tostring(canFly)))
+        end
+        return canFly
+    end
+
+    return CW.LegacyDirectFlyingEnabled()
+end
+
+-- Direct-flying capable legs return before graph expansion, so FM/taxi graph
+-- candidates stay available whenever the graph path is actually used. On
+-- non-3.3.5a/API-mismatch clients, preserve the old saved-setting fallback.
+local function ShouldSuppressFlightMasterRouting()
+    if CW.ShouldUseSpellFlyingDetection() then return false end
+    return CW.LegacyDirectFlyingEnabled()
+end
 local function GetEdgeTransportKind(edge)
     if not edge then return nil end
     local kind = edge.transportKind or edge.kind or edge.type
@@ -854,7 +954,7 @@ STATE = {
     lastGroundPlayerPos = nil,
     wasOnTaxi = false,
     pendingTaxiRouteRefresh = false,
-    taxiMicroRoutingWasSimplified = nil,
+    taxiTransitRoutingWasSimplified = nil,
     taxiNextRefreshAt = 0,
     taxiRefreshInterval = 4,
     sessionKnownTaxis = {},
@@ -1137,36 +1237,36 @@ CW.RemoveTaxiDestinationQueueHead = function(syncAfter)
     return true
 end
 
-CW.EnterTaxiMicroRoutingOverride = function()
+CW.EnterTaxiTransitRoutingOverride = function()
     EnsureDb()
     if not STATE.db then return end
     if STATE.taxiForceSimplifyTransitWaypoints then return end
 
-    STATE.taxiMicroRoutingWasSimplified = STATE.db.simplifyTransitWaypoints and true or false
+    STATE.taxiTransitRoutingWasSimplified = STATE.db.simplifyTransitWaypoints and true or false
     STATE.taxiForceSimplifyTransitWaypoints = true
     STATE.taxiNextRefreshAt = 0
 
-    InvalidateRoute("taxi micro routing off")
+    InvalidateRoute("taxi transit routing override")
     RefreshUiHeader()
-    dbg("taxi: temporary micro routing disabled")
+    dbg("taxi: temporary transit routing override enabled")
 end
 
-CW.LeaveTaxiMicroRoutingOverride = function()
+CW.LeaveTaxiTransitRoutingOverride = function()
     EnsureDb()
     if not STATE.db then return end
     if not STATE.taxiForceSimplifyTransitWaypoints then
-        STATE.taxiMicroRoutingWasSimplified = nil
+        STATE.taxiTransitRoutingWasSimplified = nil
         STATE.taxiNextRefreshAt = 0
         return
     end
 
     STATE.taxiForceSimplifyTransitWaypoints = false
-    STATE.taxiMicroRoutingWasSimplified = nil
+    STATE.taxiTransitRoutingWasSimplified = nil
     STATE.taxiNextRefreshAt = 0
 
-    InvalidateRoute("taxi micro routing restore")
+    InvalidateRoute("taxi transit routing restored")
     RefreshUiHeader()
-    dbg("taxi: micro routing restored")
+    dbg("taxi: transit routing restored")
 end
 
 local function WalkCostSeconds(wx1, wy1, wx2, wy2)
@@ -1177,6 +1277,29 @@ local function WalkCostSeconds(wx1, wy1, wx2, wy2)
         return huge
     end
     return WorldToYards(d) / yardsPerSecond
+end
+
+function CW.DirectFlyingCostSeconds(wx1, wy1, wx2, wy2)
+    local yardsPerSecond = ((STATE.db and STATE.db.walkYardsPerSecond) or 7) * 2.8
+    if yardsPerSecond <= 0 then yardsPerSecond = 19.6 end
+    local d = Dist(wx1, wy1, wx2, wy2)
+    if not d then
+        return huge
+    end
+    return WorldToYards(d) / yardsPerSecond
+end
+
+function CW.CanFlyBetweenMapIds(fromMaI, toMaI)
+    local fromRegion = CW.GetFlyableExpansionRegion(fromMaI)
+    local toRegion = CW.GetFlyableExpansionRegion(toMaI)
+    return fromRegion ~= nil and fromRegion == toRegion and CW.PlayerCanFlyInRegion(fromMaI) == true
+end
+
+local function MovementCostTypeLabel(fromMaI, wx1, wy1, toMaI, wx2, wy2, walkLabel, flyLabel)
+    if CW.CanFlyBetweenMapIds(fromMaI, toMaI) then
+        return CW.DirectFlyingCostSeconds(wx1, wy1, wx2, wy2), "flying", flyLabel or "fly"
+    end
+    return WalkCostSeconds(wx1, wy1, wx2, wy2), "walk", walkLabel or "walk"
 end
 
 local function IsRealTransportType(edgeType)
@@ -1367,21 +1490,23 @@ local function InjectLearnedTransportEdges(addNode, addEdge, graph)
     if not learned or #learned == 0 then return end
     for _, edge in ipairs(learned) do
         if edge.fromMaI and edge.toMaI and edge.fromWx and edge.fromWy and edge.toWx and edge.toWy then
-            local n1 = addNode(edge.fromMaI, edge.fromWx, edge.fromWy, edge.fromMapName or tostring(edge.fromMaI), "transport")
-            local n2 = addNode(edge.toMaI, edge.toWx, edge.toWy, edge.toMapName or tostring(edge.toMaI), "transport")
-            if graph.nodes[n1] then
-                graph.nodes[n1].learnedPortalSource = true
-                graph.nodes[n1].learnedPortalLabel = TransportLabel(edge)
-            end
-            if graph.nodes[n2] then
-                graph.nodes[n2].learnedPortalDest = true
-                graph.nodes[n2].learnedPortalLabel = TransportLabel(edge)
-            end
             NormalizeTransportRecord(edge)
             local edgeType = CanonicalTransportKind(edge.transportKind or edge.type or "transport")
-            local hopCost = TransportCostSeconds(edgeType, edge.fromWx, edge.fromWy, edge.toWx, edge.toWy)
-            addEdge(n1, n2, hopCost, edgeType, TransportLabel(edge), IsBidirectionalTransportRecord(edge), { learnedHop = (edgeType == "portal") })
-            graph.links[#graph.links + 1] = { a = n1, b = n2, type = edgeType, learned = true, bidirectional = IsBidirectionalTransportRecord(edge) }
+            if not (ShouldSuppressFlightMasterRouting() and IsFlightMasterKind(edgeType)) then
+                local n1 = addNode(edge.fromMaI, edge.fromWx, edge.fromWy, edge.fromMapName or tostring(edge.fromMaI), "transport")
+                local n2 = addNode(edge.toMaI, edge.toWx, edge.toWy, edge.toMapName or tostring(edge.toMaI), "transport")
+                if graph.nodes[n1] then
+                    graph.nodes[n1].learnedPortalSource = true
+                    graph.nodes[n1].learnedPortalLabel = TransportLabel(edge)
+                end
+                if graph.nodes[n2] then
+                    graph.nodes[n2].learnedPortalDest = true
+                    graph.nodes[n2].learnedPortalLabel = TransportLabel(edge)
+                end
+                local hopCost = TransportCostSeconds(edgeType, edge.fromWx, edge.fromWy, edge.toWx, edge.toWy)
+                addEdge(n1, n2, hopCost, edgeType, TransportLabel(edge), IsBidirectionalTransportRecord(edge), { learnedHop = (edgeType == "portal") })
+                graph.links[#graph.links + 1] = { a = n1, b = n2, type = edgeType, learned = true, bidirectional = IsBidirectionalTransportRecord(edge) }
+            end
         end
     end
 end
@@ -1412,34 +1537,38 @@ local function InjectKnownTransportEdges(addNode, addEdge, graph, map)
             local edge = CW.BuildManualTransportLikeEdgeFromKnownLocation(loc)
             if edge and edge.toMaI and edge.toWx and edge.toWy then
                 local transportKind = CanonicalTransportKind(edge.transportKind or "transport")
-                local label = tostring(edge.label or edge.name or edge.toZoneName or edge.toMapName or "Known transport")
-                local bidirectional = IsBidirectionalTransportRecord(edge)
-                local toNode = addNode(edge.toMaI, edge.toWx, edge.toWy, edge.toMapName or tostring(edge.toMaI), "transport")
-                if graph.nodes[toNode] then
-                    graph.nodes[toNode].knownTransport = true
-                    graph.nodes[toNode].knownTransportLabel = label
-                end
+                if ShouldSuppressFlightMasterRouting() and IsFlightMasterKind(transportKind) then
+                    -- In flying-mount mode, manual FM/taxi transports must not be graph candidates.
+                else
+                    local label = tostring(edge.label or edge.name or edge.toZoneName or edge.toMapName or "Known transport")
+                    local bidirectional = IsBidirectionalTransportRecord(edge)
+                    local toNode = addNode(edge.toMaI, edge.toWx, edge.toWy, edge.toMapName or tostring(edge.toMaI), "transport")
+                    if graph.nodes[toNode] then
+                        graph.nodes[toNode].knownTransport = true
+                        graph.nodes[toNode].knownTransportLabel = label
+                    end
 
-                if CW.IsSingleNodeManualTransportEdge(edge) then
-                    local aliasMaI = CW.ResolveBestMapIdFromTransportAliases(edge)
-                    if aliasMaI and tonumber(aliasMaI) and tonumber(aliasMaI) ~= tonumber(edge.toMaI) and validMapPoint(aliasMaI, edge.toWx, edge.toWy) then
-                        local aliasLabel = tostring(edge.toZoneName or edge.toSubZoneText or edge.toZoneText or label)
-                        local fromNode = addNode(aliasMaI, edge.toWx, edge.toWy, aliasLabel, "transport")
+                    if CW.IsSingleNodeManualTransportEdge(edge) then
+                        local aliasMaI = CW.ResolveBestMapIdFromTransportAliases(edge)
+                        if aliasMaI and tonumber(aliasMaI) and tonumber(aliasMaI) ~= tonumber(edge.toMaI) and validMapPoint(aliasMaI, edge.toWx, edge.toWy) then
+                            local aliasLabel = tostring(edge.toZoneName or edge.toSubZoneText or edge.toZoneText or label)
+                            local fromNode = addNode(aliasMaI, edge.toWx, edge.toWy, aliasLabel, "transport")
+                            if graph.nodes[fromNode] then
+                                graph.nodes[fromNode].knownTransport = true
+                                graph.nodes[fromNode].knownTransportLabel = label
+                            end
+                            addEdge(fromNode, toNode, TransportCostSeconds(transportKind, edge.toWx, edge.toWy, edge.toWx, edge.toWy), transportKind, label, bidirectional)
+                            graph.links[#graph.links + 1] = { a = fromNode, b = toNode, type = transportKind, knownTransport = true, bidirectional = bidirectional }
+                        end
+                    elseif edge.fromMaI and edge.fromWx and edge.fromWy then
+                        local fromNode = addNode(edge.fromMaI, edge.fromWx, edge.fromWy, edge.fromMapName or tostring(edge.fromMaI), "transport")
                         if graph.nodes[fromNode] then
                             graph.nodes[fromNode].knownTransport = true
                             graph.nodes[fromNode].knownTransportLabel = label
                         end
-                        addEdge(fromNode, toNode, TransportCostSeconds(transportKind, edge.toWx, edge.toWy, edge.toWx, edge.toWy), transportKind, label, bidirectional)
+                        addEdge(fromNode, toNode, TransportCostSeconds(transportKind, edge.fromWx, edge.fromWy, edge.toWx, edge.toWy), transportKind, label, bidirectional)
                         graph.links[#graph.links + 1] = { a = fromNode, b = toNode, type = transportKind, knownTransport = true, bidirectional = bidirectional }
                     end
-                elseif edge.fromMaI and edge.fromWx and edge.fromWy then
-                    local fromNode = addNode(edge.fromMaI, edge.fromWx, edge.fromWy, edge.fromMapName or tostring(edge.fromMaI), "transport")
-                    if graph.nodes[fromNode] then
-                        graph.nodes[fromNode].knownTransport = true
-                        graph.nodes[fromNode].knownTransportLabel = label
-                    end
-                    addEdge(fromNode, toNode, TransportCostSeconds(transportKind, edge.fromWx, edge.fromWy, edge.toWx, edge.toWy), transportKind, label, bidirectional)
-                    graph.links[#graph.links + 1] = { a = fromNode, b = toNode, type = transportKind, knownTransport = true, bidirectional = bidirectional }
                 end
             end
         end
@@ -1453,37 +1582,41 @@ local function InjectKnownRouteEdges(addNode, addEdge, graph)
     for _, loc in ipairs(known) do
         if loc and loc.kind == "route" and type(loc.routePoints) == "table" and #loc.routePoints >= 2 then
             local routeKind = CanonicalTransportKind(InferStoredTransportKind(loc) or "route")
-            local routeName = tostring(loc.name or loc.label or "Known route")
-            local lastSegmentIndex = #loc.routePoints - 1
+            if ShouldSuppressFlightMasterRouting() and IsFlightMasterKind(routeKind) then
+                -- Saved FM routes are intentionally ignored in flying-mount mode.
+            else
+                local routeName = tostring(loc.name or loc.label or "Known route")
+                local lastSegmentIndex = #loc.routePoints - 1
 
-            for i = 1, lastSegmentIndex do
-                local a = loc.routePoints[i]
-                local b = loc.routePoints[i + 1]
+                for i = 1, lastSegmentIndex do
+                    local a = loc.routePoints[i]
+                    local b = loc.routePoints[i + 1]
 
-                if a and b and a.maI and b.maI and a.wx and a.wy and b.wx and b.wy then
-                    local n1 = addNode(a.maI, a.wx, a.wy, a.mapName or tostring(a.maI), "route")
-                    local n2 = addNode(b.maI, b.wx, b.wy, b.mapName or tostring(b.maI), "route")
+                    if a and b and a.maI and b.maI and a.wx and a.wy and b.wx and b.wy then
+                        local n1 = addNode(a.maI, a.wx, a.wy, a.mapName or tostring(a.maI), "route")
+                        local n2 = addNode(b.maI, b.wx, b.wy, b.mapName or tostring(b.maI), "route")
 
-                    if graph.nodes[n1] then
-                        graph.nodes[n1].knownRoute = true
-                        graph.nodes[n1].knownRouteName = routeName
-                        if i == 1 then
-                            graph.nodes[n1].knownRouteTerminal = true
+                        if graph.nodes[n1] then
+                            graph.nodes[n1].knownRoute = true
+                            graph.nodes[n1].knownRouteName = routeName
+                            if i == 1 then
+                                graph.nodes[n1].knownRouteTerminal = true
+                            end
                         end
-                    end
-                    if graph.nodes[n2] then
-                        graph.nodes[n2].knownRoute = true
-                        graph.nodes[n2].knownRouteName = routeName
-                        if i == lastSegmentIndex then
-                            graph.nodes[n2].knownRouteTerminal = true
+                        if graph.nodes[n2] then
+                            graph.nodes[n2].knownRoute = true
+                            graph.nodes[n2].knownRouteName = routeName
+                            if i == lastSegmentIndex then
+                                graph.nodes[n2].knownRouteTerminal = true
+                            end
                         end
-                    end
 
-                    local isBidirectional = (loc.bidirectional == true) or routeKind == "flight_master"
-                    addEdge(n1, n2, GetKnownRouteHopCostSeconds(loc, a, b), routeKind, "Known route: " .. routeName, isBidirectional, {
-                        routeTransportKind = routeKind,
-                    })
-                    graph.links[#graph.links + 1] = { a = n1, b = n2, type = routeKind, knownRoute = true, bidirectional = isBidirectional }
+                        local isBidirectional = (loc.bidirectional == true) or routeKind == "flight_master"
+                        addEdge(n1, n2, GetKnownRouteHopCostSeconds(loc, a, b), routeKind, "Known route: " .. routeName, isBidirectional, {
+                            routeTransportKind = routeKind,
+                        })
+                        graph.links[#graph.links + 1] = { a = n1, b = n2, type = routeKind, knownRoute = true, bidirectional = isBidirectional }
+                    end
                 end
             end
         end
@@ -1536,6 +1669,7 @@ end
 
 local function BuildKnownTaxiNodes(map)
     if not (STATE.db and STATE.db.useFlightMasters) then return {} end
+    if ShouldSuppressFlightMasterRouting() then return {} end
     if STATE.db and IsTransitSimplifiedEffective() then return {} end
     if not Nx or not Nx.Tra then
         return {}
@@ -1830,17 +1964,19 @@ local function EnsureGraph()
             local edgeType = InferConnectorEdgeType(coT, na11, na21)
             local fromName = (na11 and na11 ~= "") and na11 or (map.ITN and map:ITN(mI1) or tostring(mI1))
             local toName = (na21 and na21 ~= "") and na21 or (map.ITN and map:ITN(mI2) or tostring(mI2))
-            local n1 = addNode(mI1, wx1, wy1, fromName, edgeType == "connector" and "connector" or "transport")
-            local n2 = addNode(mI2, wx2, wy2, toName, edgeType == "connector" and "connector" or "transport")
-            local bidi = band(fla or 0, 1) == 1
-            local edgeLabel
-            if edgeType == "connector" then
-                edgeLabel = format("Walk connection: %s -> %s", tostring(map.ITN and map:ITN(mI1) or mI1), tostring(map.ITN and map:ITN(mI2) or mI2))
-            else
-                edgeLabel = (edgeType:gsub("^%l", string.upper)) .. ": " .. tostring(map.ITN and map:ITN(mI1) or mI1) .. " -> " .. tostring(map.ITN and map:ITN(mI2) or mI2)
+            if not (ShouldSuppressFlightMasterRouting() and IsFlightMasterKind(edgeType)) then
+                local n1 = addNode(mI1, wx1, wy1, fromName, edgeType == "connector" and "connector" or "transport")
+                local n2 = addNode(mI2, wx2, wy2, toName, edgeType == "connector" and "connector" or "transport")
+                local bidi = band(fla or 0, 1) == 1
+                local edgeLabel
+                if edgeType == "connector" then
+                    edgeLabel = format("Walk connection: %s -> %s", tostring(map.ITN and map:ITN(mI1) or mI1), tostring(map.ITN and map:ITN(mI2) or mI2))
+                else
+                    edgeLabel = (edgeType:gsub("^%l", string.upper)) .. ": " .. tostring(map.ITN and map:ITN(mI1) or mI1) .. " -> " .. tostring(map.ITN and map:ITN(mI2) or mI2)
+                end
+                addEdge(n1, n2, ConnectorCostSeconds(edgeType, wx1, wy1, wx2, wy2), edgeType, edgeLabel, bidi)
+                graph.links[#graph.links + 1] = {a = n1, b = n2, type = edgeType}
             end
-            addEdge(n1, n2, ConnectorCostSeconds(edgeType, wx1, wy1, wx2, wy2), edgeType, edgeLabel, bidi)
-            graph.links[#graph.links + 1] = {a = n1, b = n2, type = edgeType}
         end
     end
 
@@ -1888,12 +2024,12 @@ local function EnsureGraph()
         for j = 1, graph.nodeCount do
             if i ~= j then
                 local nj = graph.nodes[j]
-                if ni.maI == nj.maI then
-                    local baseCost = WalkCostSeconds(ni.wx, ni.wy, nj.wx, nj.wy)
-                    if baseCost <= walkRadius then
-                        sameMap[#sameMap + 1] = { id = j, cost = math.max(1, baseCost), forced = false }
+                if ni.maI == nj.maI or CW.CanFlyBetweenMapIds(ni.maI, nj.maI) then
+                    local baseCost, moveType, moveLabel = MovementCostTypeLabel(ni.maI, ni.wx, ni.wy, nj.maI, nj.wx, nj.wy, "walk", "fly")
+                    if baseCost <= walkRadius or moveType == "flying" then
+                        sameMap[#sameMap + 1] = { id = j, cost = math.max(1, baseCost), forced = false, moveType = moveType, moveLabel = moveLabel }
                     elseif IsTravelNodeType(ni.type) and IsTravelNodeType(nj.type) then
-                        sameMap[#sameMap + 1] = { id = j, cost = baseCost + forcedWalkPenalty, forced = true }
+                        sameMap[#sameMap + 1] = { id = j, cost = baseCost + forcedWalkPenalty, forced = true, moveType = moveType, moveLabel = moveLabel == "fly" and "fly-penalized" or "walk-penalized" }
                     end
                 end
             end
@@ -1906,11 +2042,11 @@ local function EnsureGraph()
         for _, cand in ipairs(sameMap) do
             if not cand.forced then
                 if added < walkNeighbors then
-                    addEdge(i, cand.id, cand.cost, "walk", "walk", false)
+                    addEdge(i, cand.id, cand.cost, cand.moveType or "walk", cand.moveLabel or "walk", false)
                     added = added + 1
                 end
             elseif added == 0 and forcedAdded < 1 then
-                addEdge(i, cand.id, cand.cost, "walk", "walk-penalized", false)
+                addEdge(i, cand.id, cand.cost, cand.moveType or "walk", cand.moveLabel or "walk-penalized", false)
                 forcedAdded = forcedAdded + 1
             end
         end
@@ -2169,14 +2305,17 @@ local function BuildTransportLeg(startPoint, destPoint)
         if n then
             local copyEdges = {}
             for _, e in ipairs(n.edges) do
-                copyEdges[#copyEdges + 1] = {
-                    to = e.to,
-                    cost = e.cost,
-                    type = e.type,
-                    label = e.label,
-                    learnedHop = e.learnedHop,
-                    routeTransportKind = e.routeTransportKind,
-                }
+                local edgeKind = CanonicalTransportKind(e.routeTransportKind or e.type)
+                if not (ShouldSuppressFlightMasterRouting() and IsFlightMasterKind(edgeKind)) then
+                    copyEdges[#copyEdges + 1] = {
+                        to = e.to,
+                        cost = e.cost,
+                        type = e.type,
+                        label = e.label,
+                        learnedHop = e.learnedHop,
+                        routeTransportKind = e.routeTransportKind,
+                    }
+                end
             end
             nodes[id] = {
                 id = n.id,
@@ -2244,15 +2383,17 @@ local function BuildTransportLeg(startPoint, destPoint)
         for id, n in pairs(nodes) do
             if type(id) == "number"
                 and id ~= queryId
-                and n.maI == preferMapId
+                and (n.maI == preferMapId or CW.CanFlyBetweenMapIds(preferMapId, n.maI))
                 and n.type ~= "start"
                 and n.type ~= "goal" then
 
-                local raw = WalkCostSeconds(nodes[queryId].wx, nodes[queryId].wy, n.wx, n.wy)
+                local raw, moveType, moveLabel = MovementCostTypeLabel(preferMapId, nodes[queryId].wx, nodes[queryId].wy, n.maI, n.wx, n.wy, outwardLabel, isStart and "fly-to-node" or "fly-to-goal")
                 local yards = WorldToYards(Dist(nodes[queryId].wx, nodes[queryId].wy, n.wx, n.wy))
                 local pe, te = countPortalTaxi(n)
 
                 local candidate = {
+                    moveType = moveType,
+                    moveLabel = moveLabel,
                     id = id,
                     rawCost = raw,
                     yards = yards,
@@ -2325,7 +2466,7 @@ local function BuildTransportLeg(startPoint, destPoint)
             if attached >= limit then break end
 
             if c.rawCost <= 2200 and not used[c.id] then
-                connectBidirectional(queryId, c.id, c.rawCost, "walk", outwardLabel)
+                connectBidirectional(queryId, c.id, c.rawCost, c.moveType or "walk", c.moveLabel or outwardLabel)
                 used[c.id] = true
                 attached = attached + 1
             end
@@ -2338,7 +2479,7 @@ local function BuildTransportLeg(startPoint, destPoint)
             for i = 1, math.min(12, #sameMap) do
                 local c = sameMap[i]
                 if c and not used[c.id] then
-                    connectBidirectional(queryId, c.id, c.rawCost, "walk", outwardLabel)
+                    connectBidirectional(queryId, c.id, c.rawCost, c.moveType or "walk", c.moveLabel or outwardLabel)
                     used[c.id] = true
                     attached = attached + 1
                 end
@@ -2441,7 +2582,10 @@ local function BuildRouteLeg(startPoint, destPoint)
     local map = GetMap()
     if not map then return nil, "no-map" end
 
-    local directCost = WalkCostSeconds(startPoint.wx, startPoint.wy, destPoint.wx, destPoint.wy)
+    local useDirectFlying = CW.CanUseCapabilityDirectFlyingLeg(startPoint, destPoint)
+    local directCost = useDirectFlying
+        and CW.DirectFlyingCostSeconds(startPoint.wx, startPoint.wy, destPoint.wx, destPoint.wy)
+        or WalkCostSeconds(startPoint.wx, startPoint.wy, destPoint.wx, destPoint.wy)
     if IsPlayerOnTaxi() and destPoint and destPoint.cwTaxiInjected then
         local directTaxiCost = WalkCostSeconds(startPoint.wx, startPoint.wy, destPoint.wx, destPoint.wy)
         return {
@@ -2501,13 +2645,17 @@ local function BuildRouteLeg(startPoint, destPoint)
                 zx = destPoint.zx,
                 zy = destPoint.zy,
                 mapName = destPoint.mapName,
-                edgeType = "walk",
-                label = startPoint.maI ~= destPoint.maI and "Direct destination" or "Walk",
+                edgeType = useDirectFlying and "flying" or "walk",
+                label = useDirectFlying and "Direct flight" or (startPoint.maI ~= destPoint.maI and "Direct destination" or "Walk"),
                 cost = directCost,
-                forceStraight = startPoint.maI ~= destPoint.maI,
+                forceStraight = useDirectFlying or startPoint.maI ~= destPoint.maI,
             }
         },
     }
+
+    if useDirectFlying then
+        return directLeg
+    end
 
     if STATE.db and STATE.db.useIntercontinentalRouting then
         local route, why = BuildTransportLeg(startPoint, destPoint)
@@ -2768,16 +2916,6 @@ local function GetTargetTypeForRoutePoint(pt)
         return TARGET_TYPE_STRAIGHT
     end
 
-    if STATE.db and STATE.db.hasFlyingMount then
-        if pt.edgeType == "walk" or pt.edgeType == "connector" or pt.edgeType == "walklink" or pt.edgeType == "transport-to-goal" or pt.edgeType == "walk-to-transport" or pt.edgeType == "goal-to-node" then
-            return TARGET_TYPE_STRAIGHT
-        end
-
-        if pt.isQueueStop then
-            return TARGET_TYPE_STRAIGHT
-        end
-    end
-
     return TARGET_TYPE_GOTO
 end
 
@@ -2797,6 +2935,8 @@ local function BuildSyncLabel(idx, pt)
         detail = "Walk to transport"
     elseif edgeType == "transport-to-goal" then
         detail = "Walk to destination"
+    elseif edgeType == "flying" then
+        detail = "Fly"
     elseif edgeType == "walk" then
         detail = "Walk"
     elseif edgeType == "connector" or edgeType == "walklink" then
@@ -3260,7 +3400,7 @@ EnsureRoutingTuningUi = function()
 
     local f = CreateFrame('Frame', 'CustomWaypointsRoutingTuningFrame', UIParent)
     f:SetWidth(520)
-    f:SetHeight(530)
+    f:SetHeight(435)
     f:SetPoint('CENTER', UIParent, 'CENTER', 40, -20)
     -- Keep tuning above CW main UI to prevent visual mixing.
     f:SetFrameStrata('TOOLTIP')
@@ -3330,11 +3470,10 @@ EnsureRoutingTuningUi = function()
         { key = 'flightMasterBoardingSeconds', label = 'Flight master boarding seconds', min = 0, max = 180, step = 1 },
         { key = 'flightMasterSpeedYardsPerSecond', label = 'Flight master speed (yd/s)', min = 1, max = 60, step = 1 },
         { key = 'flightMasterLandingSeconds', label = 'Flight master landing seconds', min = 0, max = 120, step = 1 },
-        { key = 'maxPostPortalWalkWithoutTaxi', label = 'Max post-portal walk w/o taxi (yards)', min = 0, max = 700, step = 5 },
     }
 
     local sliders = {}
-    local topY = -76
+    local topY = -54
     for i, def in ipairs(sliderDefs) do
         local y = topY - (i - 1) * 34
         local label = f:CreateFontString(nil, 'OVERLAY', 'GameFontNormalSmall')
@@ -6524,23 +6663,22 @@ local function EnsureUi()
     end
 
     local checks = {}
-    checks.flying = MakeCheckbox("Micro Routing", 0, -122, function() SlashHandler("hasflying") end)
-    checks.autosync = MakeCheckbox("AutoSync", 100, -122, function() SlashHandler("autosync") end)
-    checks.autoadvance = MakeCheckbox("AutoAdvance", 200, -122, function() SlashHandler("autoadvance") end)
-    checks.flightmasters = MakeCheckbox("FlightMasters", 300, -122, function() SlashHandler("flightmasters") end)
-    checks.deep = MakeCheckbox("Deep", 400, -122, function(self)
+    checks.autosync = MakeCheckbox("AutoSync", 0, -122, function() SlashHandler("autosync") end)
+    checks.autoadvance = MakeCheckbox("AutoAdvance", 100, -122, function() SlashHandler("autoadvance") end)
+    checks.flightmasters = MakeCheckbox("FlightMasters", 200, -122, function() SlashHandler("flightmasters") end)
+    checks.deep = MakeCheckbox("Deep", 300, -122, function(self)
         if self:GetChecked() then SlashHandler("deep") else SlashHandler("minimal") end
     end)
-    checks.debug = MakeCheckbox("Debug", 500, -122, function() SlashHandler("debug") end)
+    checks.debug = MakeCheckbox("Debug", 400, -122, function() SlashHandler("debug") end)
     
-    checks.autodiscovery = MakeCheckbox("AutoDiscovery", 600, -122, function() SlashHandler("autodiscovery") end)
+    checks.autodiscovery = MakeCheckbox("AutoDiscovery", 500, -122, function() SlashHandler("autodiscovery") end)
     checks.portaldiscovery = checks.autodiscovery
 
     local commands = f:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
     commands:SetPoint("TOPLEFT", f, "TOPLEFT", 12, -142)
     commands:SetWidth(720)
     commands:SetJustifyH("LEFT")
-    commands:SetText("\n/cw help | ui | tuning | options | probe | add | list | export | import | sync | route | graph | clear | pop | undo | redo | autosync | autoadvance | hasflying | flightmasters | deep | minimal | debug | simplify | legend | transports | cleartransports | transportlog | autodiscovery | transportconfirmation | knownlocations | routeknown <index> | saveroute | savehere | search")
+    commands:SetText("\n/cw help | ui | tuning | options | probe | add | list | export | import | sync | route | graph | clear | pop | undo | redo | autosync | autoadvance | flightmasters | deep | minimal | debug | simplify | legend | transports | cleartransports | transportlog | autodiscovery | transportconfirmation | knownlocations | routeknown <index> | saveroute | savehere | search")
 
     local scroll = CreateFrame("ScrollFrame", "CustomWaypointsScrollFrame", f, "UIPanelScrollFrameTemplate")
     scroll:SetPoint("TOPLEFT", f, "TOPLEFT", 20, -250)
@@ -6664,12 +6802,11 @@ local function EnsureInterfaceOptionsPanel()
     local checks = {}
     checks.autosync = MakePanelCheckbox("Auto sync to Carbonite", 16, -70, function() SlashHandler("autosync") end)
     checks.autoadvance = MakePanelCheckbox("Auto advance on reach (false for recording/debugging)", 16, -100, function() SlashHandler("autoadvance") end)
-    checks.flying = MakePanelCheckbox("Micro routing", 16, -130, function() SlashHandler("hasflying") end)
-    checks.flightmasters = MakePanelCheckbox("Use flight masters in deep mode", 16, -160, function() SlashHandler("flightmasters") end)
-    checks.deep = MakePanelCheckbox("Deep routing mode", 16, -190, function(self)
+    checks.flightmasters = MakePanelCheckbox("Use flight masters in deep mode", 16, -130, function() SlashHandler("flightmasters") end)
+    checks.deep = MakePanelCheckbox("Deep routing mode", 16, -160, function(self)
         if self:GetChecked() then SlashHandler("deep") else SlashHandler("minimal") end
     end)
-    checks.autorouteinstanceondeath = MakePanelCheckbox("Auto route to instance on death", 16, -220, function(self)
+    checks.autorouteinstanceondeath = MakePanelCheckbox("Auto route to instance on death", 16, -190, function(self)
         EnsureDb()
         local enabled = self:GetChecked() and true or false
         STATE.db.autoRouteSavedInstanceOnDeath = enabled
@@ -6756,7 +6893,7 @@ local function InstallUndoRedoBindings()
 
         local d = STATE.db and STATE.db.destinations or nil
         if not d or #d == 0 then
-            pr("clear: queue already empty")
+            dbg("clear: queue already empty")
             return
         end
 
@@ -9317,8 +9454,8 @@ local function RouteSummary()
 
     local tar = map.Tar or {}
     local syncPoints = BuildSyncPoints(route.points or {})
-    pr(format("queue=%d carboniteTargets=%d expandedRoute=%d syncPoints=%d totalCost=%.1f sec explored=%d hasFlyingMount=%s simplifyTransit=%s useFlightMasters=%s",
-        #STATE.db.destinations, #tar, #route.points, #syncPoints, route.totalCost or -1, route.explored or -1, tostring(STATE.db.hasFlyingMount), tostring(STATE.db.simplifyTransitWaypoints), tostring(STATE.db.useFlightMasters)))
+    pr(format("queue=%d carboniteTargets=%d expandedRoute=%d syncPoints=%d totalCost=%.1f sec explored=%d spellFlyingDetection=%s simplifyTransit=%s useFlightMasters=%s",
+        #STATE.db.destinations, #tar, #route.points, #syncPoints, route.totalCost or -1, route.explored or -1, tostring(CW.ShouldUseSpellFlyingDetection()), tostring(STATE.db.simplifyTransitWaypoints), tostring(STATE.db.useFlightMasters)))
 
     pr(format("route: %d queue stop(s), %d point(s), ~%.0fs", #STATE.db.destinations, #route.points, route.totalCost or 0))
 
@@ -10414,7 +10551,7 @@ SlashHandler = function(msg)
     msg = string.lower(rawMsg)
 
     if msg == "" or msg == "help" then
-        pr("commands: /cw ui | tuning | options | help | probe | add | list | export | import | sync | route | graph | clear | pop | undo | redo | autosync | autoadvance | autodiscovery | hasflying | flightmasters | deep | minimal | debug | debugfm <name> | simplify | legend | transports | cleartransports | transportlog | transportconfirmation | knownlocations | search | saveroute | savehere")
+        pr("commands: /cw ui | tuning | options | help | probe | add | list | export | import | sync | route | graph | clear | pop | undo | redo | autosync | autoadvance | autodiscovery | flightmasters | deep | minimal | debug | debugfm <name> | simplify | legend | transports | cleartransports | transportlog | transportconfirmation | knownlocations | search | saveroute | savehere")
         return
     elseif msg == "ui" or msg == "panel" or msg == "window" then
         EnsureUi()
@@ -10480,14 +10617,6 @@ SlashHandler = function(msg)
         STATE.db.autoAdvance = not STATE.db.autoAdvance
         pr("autoAdvance=" .. tostring(STATE.db.autoAdvance))
         RefreshUiHeader()
-    elseif msg == "hasflying" or msg == "toggleflying" or msg == "flymode" or msg == "microrouting" then
-        STATE.db.hasFlyingMount = not STATE.db.hasFlyingMount
-        InvalidateRoute("hasFlyingMount toggled")
-        pr("hasFlyingMount=" .. tostring(STATE.db.hasFlyingMount))
-        RefreshUiHeader()
-        if STATE.db.autoSyncToCarbonite then
-            SyncQueueToCarbonite()
-        end
     elseif msg == "flightmasters" or msg == "taxi" then
         STATE.db.useFlightMasters = not STATE.db.useFlightMasters
         STATE.graph = nil
@@ -10692,7 +10821,7 @@ function OnUpdate(_, elapsed)
     local now = GetTime and GetTime() or 0
 
     if onTaxi then
-        CW.EnterTaxiMicroRoutingOverride()
+        CW.EnterTaxiTransitRoutingOverride()
         CW.EnsureTaxiDestinationQueueHead()
         if STATE.db and #(STATE.db.destinations or {}) > 0 then
             STATE.pendingTaxiRouteRefresh = true
@@ -10722,7 +10851,7 @@ function OnUpdate(_, elapsed)
         STATE.wasOnTaxi = true
     elseif STATE.wasOnTaxi then
         STATE.wasOnTaxi = false
-        CW.LeaveTaxiMicroRoutingOverride()
+        CW.LeaveTaxiTransitRoutingOverride()
         CW.RemoveTaxiDestinationQueueHead(false)
 
         if STATE.pendingTaxiRouteRefresh and current and (current.maI or (current.wx and current.wy)) then
@@ -10750,7 +10879,7 @@ function OnUpdate(_, elapsed)
             dbg("taxi ended: deferred route refresh resumed")
         end
     elseif not onTaxi then
-        CW.LeaveTaxiMicroRoutingOverride()
+        CW.LeaveTaxiTransitRoutingOverride()
         CW.RemoveTaxiDestinationQueueHead(false)
     end
 
