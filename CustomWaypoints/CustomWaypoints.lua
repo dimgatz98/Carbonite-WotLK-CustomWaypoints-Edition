@@ -51,7 +51,6 @@ local TARGET_TYPE_GOTO = "Goto"
 local TARGET_TYPE_STRAIGHT = "CW_STRAIGHT"
 
 local STRAIGHT_EDGE_TYPES = {
-    flying = true,
     boat = true,
     zeppelin = true,
     tram = true,
@@ -59,6 +58,7 @@ local STRAIGHT_EDGE_TYPES = {
     transport = true,
     taxi = true,
     flight_master = true,
+    fly = true,
     route = true,
 }
 
@@ -1289,17 +1289,151 @@ function CW.DirectFlyingCostSeconds(wx1, wy1, wx2, wy2)
     return WorldToYards(d) / yardsPerSecond
 end
 
-function CW.CanFlyBetweenMapIds(fromMaI, toMaI)
-    local fromRegion = CW.GetFlyableExpansionRegion(fromMaI)
-    local toRegion = CW.GetFlyableExpansionRegion(toMaI)
-    return fromRegion ~= nil and fromRegion == toRegion and CW.PlayerCanFlyInRegion(fromMaI) == true
+
+-- Lightweight faction routing guard.
+-- Carbonite filters some of its own faction POI/taxi data, but CW builds
+-- additional synthetic graph edges. Keep this layer data-driven and reusable:
+--  * ownerFaction = "A" means Alliance-only area/edge
+--  * ownerFaction = "H" means Horde-only area/edge
+--  * neutral/unknown data is allowed
+CW.FACTION_RESTRICTED_AREAS = CW.FACTION_RESTRICTED_AREAS or {
+    [4003] = { -- Dalaran
+        {
+            name = "Sunreaver's Sanctuary",
+            ownerFaction = "H",
+            polygon = { {61, 21}, {76, 21}, {76, 44}, {61, 44} },
+        },
+        {
+            name = "The Silver Enclave",
+            ownerFaction = "A",
+            polygon = { {34, 50}, {50, 50}, {50, 72}, {34, 72} },
+        },
+    },
+}
+
+CW.FACTION_EDGE_KEYWORDS = CW.FACTION_EDGE_KEYWORDS or {
+    A = {
+        "alliance", "stormwind", "ironforge", "darnassus", "exodar",
+        "silver enclave", "silver covenant", "valiance", "star's rest",
+        "wintergarde", "honor hold", "menethil", "theramore",
+    },
+    H = {
+        "horde", "orgrimmar", "undercity", "thunder bluff", "silvermoon",
+        "sunreaver", "warsong hold", "vengeance landing", "taunka'le",
+        "conquest hold", "venomspite", "baneflight", "thrallmar", "grom'gol",
+    },
+}
+
+function CW.GetPlayerFactionCode()
+    local faction = UnitFactionGroup and UnitFactionGroup("player")
+    if faction == "Alliance" then return "A" end
+    if faction == "Horde" then return "H" end
+    return nil
 end
 
-local function MovementCostTypeLabel(fromMaI, wx1, wy1, toMaI, wx2, wy2, walkLabel, flyLabel)
-    if CW.CanFlyBetweenMapIds(fromMaI, toMaI) then
-        return CW.DirectFlyingCostSeconds(wx1, wy1, wx2, wy2), "flying", flyLabel or "fly"
+function CW.NormalizeFactionCode(faction)
+    faction = lower(tostring(faction or ""))
+    if faction == "a" or faction == "alliance" then return "A" end
+    if faction == "h" or faction == "horde" then return "H" end
+    if faction == "n" or faction == "neutral" then return "N" end
+    return nil
+end
+
+function CW.IsFactionOwnerAllowed(ownerFaction)
+    ownerFaction = CW.NormalizeFactionCode(ownerFaction)
+    if not ownerFaction or ownerFaction == "N" then return true end
+    local playerFaction = CW.GetPlayerFactionCode()
+    if not playerFaction then return true end
+    return ownerFaction == playerFaction
+end
+
+function CW.PointInPolygon(zx, zy, polygon)
+    if type(polygon) ~= "table" or #polygon < 3 then return false end
+    zx, zy = tonumber(zx), tonumber(zy)
+    if not zx or not zy then return false end
+
+    local inside = false
+    local j = #polygon
+    for i = 1, #polygon do
+        local pi, pj = polygon[i], polygon[j]
+        local xi, yi = tonumber(pi and pi[1]), tonumber(pi and pi[2])
+        local xj, yj = tonumber(pj and pj[1]), tonumber(pj and pj[2])
+        if xi and yi and xj and yj then
+            if ((yi > zy) ~= (yj > zy)) and (zx < (xj - xi) * (zy - yi) / ((yj - yi) == 0 and 0.000001 or (yj - yi)) + xi) then
+                inside = not inside
+            end
+        end
+        j = i
     end
-    return WalkCostSeconds(wx1, wy1, wx2, wy2), "walk", walkLabel or "walk"
+    return inside
+end
+
+function CW.GetFactionRestrictedAreaAtPoint(maI, zx, zy)
+    local areas = CW.FACTION_RESTRICTED_AREAS and CW.FACTION_RESTRICTED_AREAS[tonumber(maI)]
+    if type(areas) ~= "table" then return nil end
+    for _, area in ipairs(areas) do
+        if area and CW.PointInPolygon(zx, zy, area.polygon) then
+            return area
+        end
+    end
+    return nil
+end
+
+function CW.IsFactionPointAllowed(maI, zx, zy)
+    local area = CW.GetFactionRestrictedAreaAtPoint(maI, zx, zy)
+    if not area then return true end
+    return CW.IsFactionOwnerAllowed(area.ownerFaction)
+end
+
+function CW.InferFactionOwnerFromText(text)
+    text = lower(tostring(text or ""))
+    if text == "" then return nil end
+    local foundA, foundH = false, false
+    for _, token in ipairs(CW.FACTION_EDGE_KEYWORDS.A or {}) do
+        if token ~= "" and string.find(text, token, 1, true) then foundA = true break end
+    end
+    for _, token in ipairs(CW.FACTION_EDGE_KEYWORDS.H or {}) do
+        if token ~= "" and string.find(text, token, 1, true) then foundH = true break end
+    end
+    if foundA and not foundH then return "A" end
+    if foundH and not foundA then return "H" end
+    return nil
+end
+
+function CW.IsFactionEdgeLabelAllowed(edgeType, label)
+    if edgeType == "walk" or edgeType == "connector" or edgeType == "walklink" then return true end
+    return CW.IsFactionOwnerAllowed(CW.InferFactionOwnerFromText(label))
+end
+
+function CW.GetNodeZoneCoords(node, map)
+    if not node then return nil, nil end
+    if node.zx and node.zy then return node.zx, node.zy end
+    if map and map.GZP and node.maI and node.wx and node.wy then
+        local ok, zx, zy = pcall(map.GZP, map, node.maI, node.wx, node.wy)
+        if ok then return zx, zy end
+    end
+    return nil, nil
+end
+
+function CW.IsGraphEdgeAllowedForPlayer(aNode, bNode, edgeType, label, map)
+    if not (aNode and bNode) then return true end
+    local azx, azy = CW.GetNodeZoneCoords(aNode, map)
+    local bzx, bzy = CW.GetNodeZoneCoords(bNode, map)
+    if azx and azy and not CW.IsFactionPointAllowed(aNode.maI, azx, azy) then
+        local area = CW.GetFactionRestrictedAreaAtPoint(aNode.maI, azx, azy)
+        dbg("faction routing: skipped " .. tostring(edgeType or "edge") .. " via " .. tostring(area and area.name or "restricted area"))
+        return false
+    end
+    if bzx and bzy and not CW.IsFactionPointAllowed(bNode.maI, bzx, bzy) then
+        local area = CW.GetFactionRestrictedAreaAtPoint(bNode.maI, bzx, bzy)
+        dbg("faction routing: skipped " .. tostring(edgeType or "edge") .. " via " .. tostring(area and area.name or "restricted area"))
+        return false
+    end
+    if not CW.IsFactionEdgeLabelAllowed(edgeType, tostring(label or "") .. " " .. tostring(aNode.label or "") .. " " .. tostring(bNode.label or "")) then
+        dbg("faction routing: skipped " .. tostring(edgeType or "edge") .. " label=" .. tostring(label or ""))
+        return false
+    end
+    return true
 end
 
 local function IsRealTransportType(edgeType)
@@ -1504,8 +1638,9 @@ local function InjectLearnedTransportEdges(addNode, addEdge, graph)
                     graph.nodes[n2].learnedPortalLabel = TransportLabel(edge)
                 end
                 local hopCost = TransportCostSeconds(edgeType, edge.fromWx, edge.fromWy, edge.toWx, edge.toWy)
-                addEdge(n1, n2, hopCost, edgeType, TransportLabel(edge), IsBidirectionalTransportRecord(edge), { learnedHop = (edgeType == "portal") })
-                graph.links[#graph.links + 1] = { a = n1, b = n2, type = edgeType, learned = true, bidirectional = IsBidirectionalTransportRecord(edge) }
+                if addEdge(n1, n2, hopCost, edgeType, TransportLabel(edge), IsBidirectionalTransportRecord(edge), { learnedHop = (edgeType == "portal") }) then
+                    graph.links[#graph.links + 1] = { a = n1, b = n2, type = edgeType, learned = true, bidirectional = IsBidirectionalTransportRecord(edge) }
+                end
             end
         end
     end
@@ -1540,35 +1675,37 @@ local function InjectKnownTransportEdges(addNode, addEdge, graph, map)
                 if ShouldSuppressFlightMasterRouting() and IsFlightMasterKind(transportKind) then
                     -- In flying-mount mode, manual FM/taxi transports must not be graph candidates.
                 else
-                    local label = tostring(edge.label or edge.name or edge.toZoneName or edge.toMapName or "Known transport")
-                    local bidirectional = IsBidirectionalTransportRecord(edge)
-                    local toNode = addNode(edge.toMaI, edge.toWx, edge.toWy, edge.toMapName or tostring(edge.toMaI), "transport")
-                    if graph.nodes[toNode] then
-                        graph.nodes[toNode].knownTransport = true
-                        graph.nodes[toNode].knownTransportLabel = label
-                    end
+                local label = tostring(edge.label or edge.name or edge.toZoneName or edge.toMapName or "Known transport")
+                local bidirectional = IsBidirectionalTransportRecord(edge)
+                local toNode = addNode(edge.toMaI, edge.toWx, edge.toWy, edge.toMapName or tostring(edge.toMaI), "transport")
+                if graph.nodes[toNode] then
+                    graph.nodes[toNode].knownTransport = true
+                    graph.nodes[toNode].knownTransportLabel = label
+                end
 
-                    if CW.IsSingleNodeManualTransportEdge(edge) then
-                        local aliasMaI = CW.ResolveBestMapIdFromTransportAliases(edge)
-                        if aliasMaI and tonumber(aliasMaI) and tonumber(aliasMaI) ~= tonumber(edge.toMaI) and validMapPoint(aliasMaI, edge.toWx, edge.toWy) then
-                            local aliasLabel = tostring(edge.toZoneName or edge.toSubZoneText or edge.toZoneText or label)
-                            local fromNode = addNode(aliasMaI, edge.toWx, edge.toWy, aliasLabel, "transport")
-                            if graph.nodes[fromNode] then
-                                graph.nodes[fromNode].knownTransport = true
-                                graph.nodes[fromNode].knownTransportLabel = label
-                            end
-                            addEdge(fromNode, toNode, TransportCostSeconds(transportKind, edge.toWx, edge.toWy, edge.toWx, edge.toWy), transportKind, label, bidirectional)
-                            graph.links[#graph.links + 1] = { a = fromNode, b = toNode, type = transportKind, knownTransport = true, bidirectional = bidirectional }
-                        end
-                    elseif edge.fromMaI and edge.fromWx and edge.fromWy then
-                        local fromNode = addNode(edge.fromMaI, edge.fromWx, edge.fromWy, edge.fromMapName or tostring(edge.fromMaI), "transport")
+                if CW.IsSingleNodeManualTransportEdge(edge) then
+                    local aliasMaI = CW.ResolveBestMapIdFromTransportAliases(edge)
+                    if aliasMaI and tonumber(aliasMaI) and tonumber(aliasMaI) ~= tonumber(edge.toMaI) and validMapPoint(aliasMaI, edge.toWx, edge.toWy) then
+                        local aliasLabel = tostring(edge.toZoneName or edge.toSubZoneText or edge.toZoneText or label)
+                        local fromNode = addNode(aliasMaI, edge.toWx, edge.toWy, aliasLabel, "transport")
                         if graph.nodes[fromNode] then
                             graph.nodes[fromNode].knownTransport = true
                             graph.nodes[fromNode].knownTransportLabel = label
                         end
-                        addEdge(fromNode, toNode, TransportCostSeconds(transportKind, edge.fromWx, edge.fromWy, edge.toWx, edge.toWy), transportKind, label, bidirectional)
+                        if addEdge(fromNode, toNode, TransportCostSeconds(transportKind, edge.toWx, edge.toWy, edge.toWx, edge.toWy), transportKind, label, bidirectional) then
+                            graph.links[#graph.links + 1] = { a = fromNode, b = toNode, type = transportKind, knownTransport = true, bidirectional = bidirectional }
+                        end
+                    end
+                elseif edge.fromMaI and edge.fromWx and edge.fromWy then
+                    local fromNode = addNode(edge.fromMaI, edge.fromWx, edge.fromWy, edge.fromMapName or tostring(edge.fromMaI), "transport")
+                    if graph.nodes[fromNode] then
+                        graph.nodes[fromNode].knownTransport = true
+                        graph.nodes[fromNode].knownTransportLabel = label
+                    end
+                    if addEdge(fromNode, toNode, TransportCostSeconds(transportKind, edge.fromWx, edge.fromWy, edge.toWx, edge.toWy), transportKind, label, bidirectional) then
                         graph.links[#graph.links + 1] = { a = fromNode, b = toNode, type = transportKind, knownTransport = true, bidirectional = bidirectional }
                     end
+                end
                 end
             end
         end
@@ -1612,10 +1749,11 @@ local function InjectKnownRouteEdges(addNode, addEdge, graph)
                         end
 
                         local isBidirectional = (loc.bidirectional == true) or routeKind == "flight_master"
-                        addEdge(n1, n2, GetKnownRouteHopCostSeconds(loc, a, b), routeKind, "Known route: " .. routeName, isBidirectional, {
+                        if addEdge(n1, n2, GetKnownRouteHopCostSeconds(loc, a, b), routeKind, "Known route: " .. routeName, isBidirectional, {
                             routeTransportKind = routeKind,
-                        })
-                        graph.links[#graph.links + 1] = { a = n1, b = n2, type = routeKind, knownRoute = true, bidirectional = isBidirectional }
+                        }) then
+                            graph.links[#graph.links + 1] = { a = n1, b = n2, type = routeKind, knownRoute = true, bidirectional = isBidirectional }
+                        end
                     end
                 end
             end
@@ -1909,7 +2047,8 @@ local function EnsureGraph()
 
     local function addEdge(a, b, cost, edgeType, label, bidirectional, opts)
         opts = opts or {}
-        if not graph.nodes[a] or not graph.nodes[b] then return end
+        if not graph.nodes[a] or not graph.nodes[b] then return false end
+        if not CW.IsGraphEdgeAllowedForPlayer(graph.nodes[a], graph.nodes[b], edgeType, label, map) then return false end
         tinsert(graph.nodes[a].edges, {
             to = b,
             cost = cost,
@@ -1930,6 +2069,7 @@ local function EnsureGraph()
             })
             graph.edgeCount = graph.edgeCount + 1
         end
+        return true
     end
 
     local function addPassageEdgesFromMWI()
@@ -1944,8 +2084,9 @@ local function EnsureGraph()
                                 local toName = map.ITN and map:ITN(con.EMI1 or destMaI) or tostring(con.EMI1 or destMaI)
                                 local n1 = addNode(con.SMI or maI, con.StX, con.StY, fromName, "connector")
                                 local n2 = addNode(con.EMI1 or destMaI, con.EnX, con.EnY, toName, "connector")
-                                addEdge(n1, n2, con.Dis or WalkCostSeconds(con.StX, con.StY, con.EnX, con.EnY), "connector", format("Passage: %s -> %s", tostring(fromName), tostring(toName)), true)
-                                graph.links[#graph.links + 1] = { a = n1, b = n2, type = "connector" }
+                                if addEdge(n1, n2, con.Dis or WalkCostSeconds(con.StX, con.StY, con.EnX, con.EnY), "connector", format("Passage: %s -> %s", tostring(fromName), tostring(toName)), true) then
+                                    graph.links[#graph.links + 1] = { a = n1, b = n2, type = "connector" }
+                                end
                             end
                         end
                     end
@@ -1974,8 +2115,9 @@ local function EnsureGraph()
                 else
                     edgeLabel = (edgeType:gsub("^%l", string.upper)) .. ": " .. tostring(map.ITN and map:ITN(mI1) or mI1) .. " -> " .. tostring(map.ITN and map:ITN(mI2) or mI2)
                 end
-                addEdge(n1, n2, ConnectorCostSeconds(edgeType, wx1, wy1, wx2, wy2), edgeType, edgeLabel, bidi)
-                graph.links[#graph.links + 1] = {a = n1, b = n2, type = edgeType}
+                if addEdge(n1, n2, ConnectorCostSeconds(edgeType, wx1, wy1, wx2, wy2), edgeType, edgeLabel, bidi) then
+                    graph.links[#graph.links + 1] = {a = n1, b = n2, type = edgeType}
+                end
             end
         end
     end
@@ -1998,8 +2140,9 @@ local function EnsureGraph()
                 local b = taxiNodeIds[j]
                 local ok, directCost = pcall(Nx.Tra.TFCT, Nx.Tra, a.taxiName, b.taxiName)
                 if ok and directCost and directCost > 0 then
-                    addEdge(a.id, b.id, TransportCostSeconds("flight_master", a.wx, a.wy, b.wx, b.wy), "flight_master", format("Flight Master: %s -> %s", tostring(a.taxiName), tostring(b.taxiName)), true)
-                    graph.links[#graph.links + 1] = {a = a.id, b = b.id, type = "flight_master"}
+                    if addEdge(a.id, b.id, TransportCostSeconds("flight_master", a.wx, a.wy, b.wx, b.wy), "flight_master", format("Flight Master: %s -> %s", tostring(a.taxiName), tostring(b.taxiName)), true) then
+                        graph.links[#graph.links + 1] = {a = a.id, b = b.id, type = "flight_master"}
+                    end
                 end
             end
         end
@@ -2024,12 +2167,12 @@ local function EnsureGraph()
         for j = 1, graph.nodeCount do
             if i ~= j then
                 local nj = graph.nodes[j]
-                if ni.maI == nj.maI or CW.CanFlyBetweenMapIds(ni.maI, nj.maI) then
-                    local baseCost, moveType, moveLabel = MovementCostTypeLabel(ni.maI, ni.wx, ni.wy, nj.maI, nj.wx, nj.wy, "walk", "fly")
-                    if baseCost <= walkRadius or moveType == "flying" then
-                        sameMap[#sameMap + 1] = { id = j, cost = math.max(1, baseCost), forced = false, moveType = moveType, moveLabel = moveLabel }
+                if ni.maI == nj.maI then
+                    local baseCost = WalkCostSeconds(ni.wx, ni.wy, nj.wx, nj.wy)
+                    if baseCost <= walkRadius then
+                        sameMap[#sameMap + 1] = { id = j, cost = math.max(1, baseCost), forced = false }
                     elseif IsTravelNodeType(ni.type) and IsTravelNodeType(nj.type) then
-                        sameMap[#sameMap + 1] = { id = j, cost = baseCost + forcedWalkPenalty, forced = true, moveType = moveType, moveLabel = moveLabel == "fly" and "fly-penalized" or "walk-penalized" }
+                        sameMap[#sameMap + 1] = { id = j, cost = baseCost + forcedWalkPenalty, forced = true }
                     end
                 end
             end
@@ -2042,11 +2185,11 @@ local function EnsureGraph()
         for _, cand in ipairs(sameMap) do
             if not cand.forced then
                 if added < walkNeighbors then
-                    addEdge(i, cand.id, cand.cost, cand.moveType or "walk", cand.moveLabel or "walk", false)
+                    addEdge(i, cand.id, cand.cost, "walk", "walk", false)
                     added = added + 1
                 end
             elseif added == 0 and forcedAdded < 1 then
-                addEdge(i, cand.id, cand.cost, cand.moveType or "walk", cand.moveLabel or "walk-penalized", false)
+                addEdge(i, cand.id, cand.cost, "walk", "walk-penalized", false)
                 forcedAdded = forcedAdded + 1
             end
         end
@@ -2355,8 +2498,10 @@ local function BuildTransportLeg(startPoint, destPoint)
     end
 
     local function connectBidirectional(a, b, cost, edgeType, label)
+        if not CW.IsGraphEdgeAllowedForPlayer(nodes[a], nodes[b], edgeType, label, GetMap()) then return false end
         tinsert(nodes[a].edges, {to = b, cost = cost, type = edgeType, label = label})
         tinsert(nodes[b].edges, {to = a, cost = cost, type = edgeType, label = label})
+        return true
     end
 
        local function attachQueryNode(queryId, preferMapId, preferContinent, outwardLabel)
@@ -2383,17 +2528,15 @@ local function BuildTransportLeg(startPoint, destPoint)
         for id, n in pairs(nodes) do
             if type(id) == "number"
                 and id ~= queryId
-                and (n.maI == preferMapId or CW.CanFlyBetweenMapIds(preferMapId, n.maI))
+                and n.maI == preferMapId
                 and n.type ~= "start"
                 and n.type ~= "goal" then
 
-                local raw, moveType, moveLabel = MovementCostTypeLabel(preferMapId, nodes[queryId].wx, nodes[queryId].wy, n.maI, n.wx, n.wy, outwardLabel, isStart and "fly-to-node" or "fly-to-goal")
+                local raw = WalkCostSeconds(nodes[queryId].wx, nodes[queryId].wy, n.wx, n.wy)
                 local yards = WorldToYards(Dist(nodes[queryId].wx, nodes[queryId].wy, n.wx, n.wy))
                 local pe, te = countPortalTaxi(n)
 
                 local candidate = {
-                    moveType = moveType,
-                    moveLabel = moveLabel,
                     id = id,
                     rawCost = raw,
                     yards = yards,
@@ -2466,9 +2609,10 @@ local function BuildTransportLeg(startPoint, destPoint)
             if attached >= limit then break end
 
             if c.rawCost <= 2200 and not used[c.id] then
-                connectBidirectional(queryId, c.id, c.rawCost, c.moveType or "walk", c.moveLabel or outwardLabel)
-                used[c.id] = true
-                attached = attached + 1
+                if connectBidirectional(queryId, c.id, c.rawCost, "walk", outwardLabel) then
+                    used[c.id] = true
+                    attached = attached + 1
+                end
             end
         end
 
@@ -2479,9 +2623,10 @@ local function BuildTransportLeg(startPoint, destPoint)
             for i = 1, math.min(12, #sameMap) do
                 local c = sameMap[i]
                 if c and not used[c.id] then
-                    connectBidirectional(queryId, c.id, c.rawCost, c.moveType or "walk", c.moveLabel or outwardLabel)
-                    used[c.id] = true
-                    attached = attached + 1
+                    if connectBidirectional(queryId, c.id, c.rawCost, "walk", outwardLabel) then
+                        used[c.id] = true
+                        attached = attached + 1
+                    end
                 end
             end
         end
@@ -2645,8 +2790,8 @@ local function BuildRouteLeg(startPoint, destPoint)
                 zx = destPoint.zx,
                 zy = destPoint.zy,
                 mapName = destPoint.mapName,
-                edgeType = useDirectFlying and "flying" or "walk",
-                label = useDirectFlying and "Direct flight" or (startPoint.maI ~= destPoint.maI and "Direct destination" or "Walk"),
+                edgeType = useDirectFlying and "fly" or "walk",
+                label = useDirectFlying and "Fly" or (startPoint.maI ~= destPoint.maI and "Direct destination" or "Walk"),
                 cost = directCost,
                 forceStraight = useDirectFlying or startPoint.maI ~= destPoint.maI,
             }
@@ -2935,8 +3080,6 @@ local function BuildSyncLabel(idx, pt)
         detail = "Walk to transport"
     elseif edgeType == "transport-to-goal" then
         detail = "Walk to destination"
-    elseif edgeType == "flying" then
-        detail = "Fly"
     elseif edgeType == "walk" then
         detail = "Walk"
     elseif edgeType == "connector" or edgeType == "walklink" then
@@ -2953,6 +3096,8 @@ local function BuildSyncLabel(idx, pt)
         detail = "Transport"
     elseif edgeType == "taxi" then
         detail = "Flight Master"
+    elseif edgeType == "fly" then
+        detail = "Fly"
     elseif edgeType == "fallback" then
         detail = "Fallback"
     else
@@ -3400,7 +3545,7 @@ EnsureRoutingTuningUi = function()
 
     local f = CreateFrame('Frame', 'CustomWaypointsRoutingTuningFrame', UIParent)
     f:SetWidth(520)
-    f:SetHeight(435)
+    f:SetHeight(530)
     f:SetPoint('CENTER', UIParent, 'CENTER', 40, -20)
     -- Keep tuning above CW main UI to prevent visual mixing.
     f:SetFrameStrata('TOOLTIP')
@@ -3470,10 +3615,11 @@ EnsureRoutingTuningUi = function()
         { key = 'flightMasterBoardingSeconds', label = 'Flight master boarding seconds', min = 0, max = 180, step = 1 },
         { key = 'flightMasterSpeedYardsPerSecond', label = 'Flight master speed (yd/s)', min = 1, max = 60, step = 1 },
         { key = 'flightMasterLandingSeconds', label = 'Flight master landing seconds', min = 0, max = 120, step = 1 },
+        { key = 'maxPostPortalWalkWithoutTaxi', label = 'Max post-portal walk w/o taxi (yards)', min = 0, max = 700, step = 5 },
     }
 
     local sliders = {}
-    local topY = -54
+    local topY = -76
     for i, def in ipairs(sliderDefs) do
         local y = topY - (i - 1) * 34
         local label = f:CreateFontString(nil, 'OVERLAY', 'GameFontNormalSmall')
