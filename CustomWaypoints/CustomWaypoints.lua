@@ -55,6 +55,7 @@ local STRAIGHT_EDGE_TYPES = {
     zeppelin = true,
     tram = true,
     portal = true,
+    passage = true,
     transport = true,
     taxi = true,
     flight_master = true,
@@ -67,6 +68,7 @@ local TRANSIT_EDGE_TYPES = {
     zeppelin = true,
     tram = true,
     portal = true,
+    passage = true,
     taxi = true,
     flight_master = true,
     route = true,
@@ -371,6 +373,13 @@ end
 
 function CW.CanUseCapabilityDirectFlyingLeg(startPoint, destPoint)
     if not (startPoint and destPoint and startPoint.wx and startPoint.wy and destPoint.wx and destPoint.wy) then
+        return false
+    end
+
+    -- Parent/child map layers such as Dalaran -> Dalaran Underbelly must be
+    -- resolved by the graph via an explicit saved passage/transport. Do not
+    -- let the flying fast-path bypass that transport-only rule.
+    if CW.IsLikelyTransportOnlyMapTransition and CW.IsLikelyTransportOnlyMapTransition(startPoint, destPoint) then
         return false
     end
 
@@ -787,6 +796,137 @@ function CW.DoesPointMatchCurrentZoneContext(pt)
         or CW.DoesPlayerAlreadyMatchZoneNameLoosely(pt.zoneText)
         or CW.DoesPlayerAlreadyMatchZoneNameLoosely(pt.userName)
         or CW.DoesPlayerAlreadyMatchZoneNameLoosely(pt.mapName)
+end
+
+function CW.GetPointMapNameForRouting(pt)
+    if not pt then return nil end
+
+    local maI = tonumber(pt.maI)
+    if maI then
+        local map = nil
+        if Nx and Nx.Map and type(Nx.Map.GeM) == "function" then
+            local ok, value = pcall(Nx.Map.GeM, Nx.Map, 1)
+            if ok then map = value end
+        end
+        if map and type(map.ITN) == "function" then
+            local ok, name = pcall(map.ITN, map, maI)
+            if ok and name and tostring(name) ~= "" then
+                return tostring(name)
+            end
+        end
+        if Nx and Nx.MITN and Nx.MITN[maI] and tostring(Nx.MITN[maI]) ~= "" then
+            return tostring(Nx.MITN[maI])
+        end
+    end
+
+    return pt.mapName or pt.subZoneText or pt.zoneText
+end
+
+function CW.DoesPointMatchCurrentZoneContextStrict(pt)
+    if not pt then return false end
+
+    local pos = GetPlayerWorldPos()
+    if not pos then return false end
+
+    local currentSubKey = CW.NormalizeZoneLookupKey(pos.subZoneText)
+    local currentZoneKey = CW.NormalizeZoneLookupKey(pos.zoneText)
+    local currentMapKey = CW.NormalizeZoneLookupKey(CW.GetPointMapNameForRouting(pos) or pos.mapName)
+    local currentSubKeyIsSpecific = currentSubKey ~= ""
+        and currentSubKey ~= currentZoneKey
+        and currentSubKey ~= currentMapKey
+
+    local targetMapKey = CW.NormalizeZoneLookupKey(CW.GetPointMapNameForRouting(pt) or pt.mapName)
+    local currentMaI = tonumber(pos.maI)
+    local targetMaI = tonumber(pt.maI)
+
+    -- If the target is a different Carbonite map layer, only a real live match
+    -- to that specific layer/subzone counts as "already there". A parent zone
+    -- name (Dalaran) must not satisfy a child-layer target (Dalaran Underbelly).
+    if currentMaI and targetMaI and currentMaI ~= targetMaI and targetMapKey ~= "" then
+        if currentMapKey == targetMapKey then
+            return true
+        end
+        return currentSubKeyIsSpecific
+            and (currentSubKey == targetMapKey
+                or string.find(targetMapKey, currentSubKey, 1, true) ~= nil
+                or string.find(currentSubKey, targetMapKey, 1, true) ~= nil)
+    end
+
+    local function matches(destValue)
+        local destKey = CW.NormalizeZoneLookupKey(destValue)
+        if destKey == "" then return false end
+
+        if currentSubKey == destKey
+            or currentZoneKey == destKey
+            or currentMapKey == destKey then
+            return true
+        end
+
+        -- Allow "Underbelly" to match "Dalaran Underbelly" only through
+        -- the live subzone text. Do not let the parent map name "Dalaran"
+        -- count as already being inside "Dalaran Underbelly".
+        return currentSubKeyIsSpecific
+            and (string.find(destKey, currentSubKey, 1, true) ~= nil
+                or string.find(currentSubKey, destKey, 1, true) ~= nil)
+    end
+
+    return matches(pt.subZoneText)
+        or matches(pt.zoneText)
+        or matches(pt.userName)
+        or matches(CW.GetPointMapNameForRouting(pt) or pt.mapName)
+end
+
+function CW.IsLikelyTransportOnlyMapTransition(startPoint, destPoint)
+    if not (startPoint and destPoint) then return false end
+
+    local startMaI = tonumber(startPoint.maI)
+    local destMaI = tonumber(destPoint.maI)
+    if not startMaI or not destMaI or startMaI == destMaI then
+        return false
+    end
+
+    local startName = CW.GetPointMapNameForRouting(startPoint) or startPoint.mapName or startPoint.zoneText or startPoint.subZoneText
+    local destName = CW.GetPointMapNameForRouting(destPoint) or destPoint.mapName or destPoint.zoneText or destPoint.subZoneText
+    local startKey = CW.NormalizeZoneLookupKey(startName)
+    local destKey = CW.NormalizeZoneLookupKey(destName)
+    if startKey == "" or destKey == "" or startKey == destKey then
+        return false
+    end
+
+    -- Parent/child Carbonite maps can share almost identical world coordinates
+    -- but still require an explicit passage/transport edge (for example
+    -- Dalaran -> Dalaran Underbelly). Do not let flying/walk fallback bridge
+    -- those map layers just because the player can fly in the expansion region.
+    local yards = WorldToYards(Dist(startPoint.wx, startPoint.wy, destPoint.wx, destPoint.wy))
+    if yards == huge or yards > 1200 then
+        return false
+    end
+
+    return string.find(destKey, startKey, 1, true) ~= nil
+        or string.find(startKey, destKey, 1, true) ~= nil
+end
+
+function CW.DoesLegRequireTransportPath(startPoint, destPoint)
+    if not (startPoint and destPoint) then return false end
+    if destPoint.cwAllowDirectTravel == true then return false end
+
+    -- Different parent/child map layers are transport-only unless the live
+    -- player context really is already in the destination layer/subzone.
+    if CW.IsLikelyTransportOnlyMapTransition(startPoint, destPoint) then
+        return not CW.DoesPointMatchCurrentZoneContextStrict(destPoint)
+    end
+
+    -- If the player is already in the requested subzone/context, do not force
+    -- an entry anchor back to the same place.
+    if CW.DoesPointMatchCurrentZoneContextStrict(destPoint) then
+        return false
+    end
+
+    if destPoint.cwRequireTransportPath == true or destPoint.cwRequireTransport == true then
+        return true
+    end
+
+    return false
 end
 
 local function InferStoredTransportKind(loc)
@@ -2727,7 +2867,8 @@ local function BuildRouteLeg(startPoint, destPoint)
     local map = GetMap()
     if not map then return nil, "no-map" end
 
-    local useDirectFlying = CW.CanUseCapabilityDirectFlyingLeg(startPoint, destPoint)
+    local requireTransportPath = CW.DoesLegRequireTransportPath(startPoint, destPoint)
+    local useDirectFlying = (not requireTransportPath) and CW.CanUseCapabilityDirectFlyingLeg(startPoint, destPoint)
     local directCost = useDirectFlying
         and CW.DirectFlyingCostSeconds(startPoint.wx, startPoint.wy, destPoint.wx, destPoint.wy)
         or WalkCostSeconds(startPoint.wx, startPoint.wy, destPoint.wx, destPoint.wy)
@@ -2808,10 +2949,19 @@ local function BuildRouteLeg(startPoint, destPoint)
             -- Same-map legs must still be allowed to use FM/transport when cheaper.
             if startPoint.maI == destPoint.maI then
                 local routeCost = tonumber(route.totalCost) or huge
-                if route.transportUsed and not CW.DoesPointMatchCurrentZoneContext(destPoint) and routeCost <= directCost + 10 then
+                if route.transportUsed and (requireTransportPath or (not CW.DoesPointMatchCurrentZoneContextStrict(destPoint) and routeCost <= directCost + 10)) then
                     return route
                 end
+                if requireTransportPath then
+                    dbg("transport-required same-map leg rejected non-transport path")
+                    return nil, "transport-required-no-transport-edge"
+                end
                 return directLeg
+            end
+
+            if requireTransportPath and not route.transportUsed then
+                dbg("transport-required leg rejected non-transport path")
+                return nil, "transport-required-no-transport-edge"
             end
 
             return route
@@ -2820,6 +2970,11 @@ local function BuildRouteLeg(startPoint, destPoint)
         local startCont = startPoint.continent or nil
         local destCont = destPoint.continent or nil
         local crossContinent = startCont and destCont and startCont ~= destCont
+
+        if requireTransportPath then
+            dbg("transport-required leg has no transport path: " .. tostring(why))
+            return nil, "transport-required-no-path"
+        end
 
         if crossContinent then
             return BuildDirectFallbackLeg(startPoint, destPoint, why, true)
@@ -2835,6 +2990,11 @@ local function BuildRouteLeg(startPoint, destPoint)
         else
             dbg("graph leg fallback to direct walk: " .. tostring(why))
         end
+    end
+
+    if requireTransportPath then
+        dbg("transport-required leg has no transport path")
+        return nil, "transport-required-no-path"
     end
 
     return directLeg
@@ -3092,6 +3252,8 @@ local function BuildSyncLabel(idx, pt)
         detail = "Boat"
     elseif edgeType == "portal" then
         detail = "Portal"
+    elseif edgeType == "passage" then
+        detail = "Passage"
     elseif edgeType == "transport" then
         detail = "Transport"
     elseif edgeType == "taxi" then
@@ -8352,11 +8514,17 @@ function CW.BuildManualTransportLikeEdgeFromKnownLocation(loc)
     local dest = CloneKnownLocationDestination(loc)
     if not dest then return nil end
 
+    local from = loc.previousTarget or loc.entrance
+    local to = loc.lastTarget or loc.destination or dest
+    if to then
+        dest = CloneWorldPoint(to) or dest
+    end
+
     local kind = CanonicalTransportKind(InferStoredTransportKind(loc) or loc.transportKind or "transport")
     local zoneHint = tostring(loc.zoneNameHint or loc.name or loc.label or dest.subZoneText or dest.zoneText or dest.mapName or "")
     local trackerLabel = loc.trackerLabel or loc.label or nil
 
-    return NormalizeTransportRecord({
+    local edge = {
         toMaI = dest.maI,
         toWx = dest.wx,
         toWy = dest.wy,
@@ -8374,7 +8542,23 @@ function CW.BuildManualTransportLikeEdgeFromKnownLocation(loc)
         transportKind = kind,
         bidirectional = (loc.bidirectional == true) or kind == "flight_master",
         discoveredBy = loc.discoveredBy or "manual-saveroute",
-    })
+    }
+
+    if from and from.maI and from.wx and from.wy then
+        edge.fromMaI = from.maI
+        edge.fromWx = from.wx
+        edge.fromWy = from.wy
+        edge.fromZx = from.zx
+        edge.fromZy = from.zy
+        edge.fromMapName = from.mapName
+        edge.fromZoneText = from.zoneText
+        edge.fromSubZoneText = from.subZoneText
+        edge.fromZoneName = from.subZoneText or from.zoneText or from.mapName
+        edge.fromInstance = from.instance
+        edge.fromInstanceType = from.instanceType
+    end
+
+    return NormalizeTransportRecord(edge)
 end
 
 function CW.ResolveMapIdBySmartName(name)
