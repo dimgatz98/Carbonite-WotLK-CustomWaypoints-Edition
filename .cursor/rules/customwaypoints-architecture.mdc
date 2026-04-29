@@ -1,0 +1,18 @@
+---
+description: CustomWaypoints architecture and ownership rules
+globs:
+  - "CustomWaypoints/**/*.lua"
+  - "CustomWaypoints.lua"
+alwaysApply: true
+---
+
+# CustomWaypoints architecture rules
+
+- Carbonite is the map/rendering/low-level target backend.
+- CustomWaypoints owns the queue, known locations, learned transports, route expansion, import/export, UI, and sync policy.
+- `CustomWaypointsDB.destinations` is the active queue source of truth.
+- Carbonite targets are a projection only and must not become source of truth.
+- Do not reintroduce a separate transport-management UI. Known Locations manages routes, transports, and instances.
+- Keep ordinary waypoint import as replace-queue. Keep known-location import as merge + dedupe.
+- Preserve WotLK 3.3.5a compatibility. Avoid retail-only API assumptions.
+- Prefer existing Carbonite map functions and CW helpers over new coordinate/math systems.

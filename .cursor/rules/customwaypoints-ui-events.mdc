@@ -1,0 +1,21 @@
+---
+description: UI, hooks, events, taxi, and discovery rules
+globs:
+  - "CustomWaypoints/**/*.lua"
+  - "CustomWaypoints.lua"
+alwaysApply: true
+---
+
+# UI and event rules
+
+- CW frames that behave as dialogs must use the CW modal stack.
+- ESC closes the latest CW modal only.
+- UI must not block WASD during normal gameplay.
+- Search/edit boxes must clear focus correctly and not trigger global delete.
+- Carbonite clear during CW sync must not clear the CW queue.
+- User Carbonite clear must clear the CW queue.
+- On taxi, suppress repeated expensive route rebuilds and repeated Carbonite recentering.
+- Taxi route refresh should be throttled and then rerun once after taxi end.
+- Transport discovery must avoid spam, duplicates, local overlays, and LFG teleport false positives.
+- No/ESC on discovery confirmation must suppress repeats.
+- Death autoroute must be optional, delayed/retried, instance-context based, and non-looping.

@@ -1,46 +1,24 @@
 ----- COPY KNOWN LOCATIONS FROM HERE -----
 CWKNOWN|instance|Drak'Tharon Keep||partyransport|0||0
 1|4005|Grizzly Hills|17.367|21.204|2843.382550|-2836.296007|?|?|?
-CWKNOWNoute|Flight Master: Valiance Keep -> Dalaran|Flight Master: Valiance Keep -> Dalaran||flight_master|1||0
-1|4001|Borean Tundra|58.967|68.290|1405.122012|-2336.431341|2026-04-17 19:46:06|Borean Tundra FM|Borean Tundra FM
-2|4003|Dalaran|72.161|45.786|2321.083336|-3100.048723|2026-04-17 19:46:45|Dalaran FM|Dalaran FM
 CWKNOWNoute|Dalaran Center|Dalaran Center|oute|0||0
 1|4003|Dalaran|49.593|48.211|2292.285006|-3097.985721|?|?|?
-CWKNOWNoute|Stormwind to Booty Bay FMoute||flight_master|1||0
-1|2020|Stormwind City|70.979|72.542|3686.063435|1567.174495|2026-04-08 20:49:27|Stormwind Flight Master|Flight Master
-2|2021|Stranglethorn Vale|27.504|77.780|3690.852911|2695.537280|2026-04-08 20:49:55|?|?
-CWKNOWNoute|FM: Booty Bay to Westfall|FM: Booty Bay to Westfall||flight_master|1||0
-1|2021|Stranglethorn Vale|27.603|77.782|3692.116265|2695.554684|2026-04-09 01:22:29|?|?
-2|2027|Westfall|56.710|52.694|3577.637667|1925.905676|2026-04-09 01:22:23|?|?
-CWKNOWNoute|FM: Stormwind to Sentinel Hill|FM: Stormwind to Sentinel Hill||flight_master|1||0
-1|2020|Stormwind City|70.996|72.668|3686.123864|1567.466529|2026-04-09 02:04:16|FM: Stormwind to Sentinel Hill|FM: Stormwind to Sentinel Hill
-CWKNOWNoute|FM: Stormwind to Westfall|FM: Stormwind to Westfall||flight_master|1||0
-1|2020|Stormwind City|70.967|72.509|3686.020313|1567.099189|2026-04-09 11:57:58|?|?
-2|2027|Westfall|56.558|52.638|3576.573891|1925.647292|2026-04-09 11:58:08|?|?
-CWKNOWNoute|FM: Stormwind -> Duskwood|FM: Stormwind -> Duskwood||flight_master|1||0
-1|2020|Stormwind City|71.054|72.534|3686.323351|1567.157100|2026-04-09 15:39:21|Stormwind City FM|FM
-2|2008|Duskwood|77.538|44.286|4036.039019|1902.761517|2026-04-09 15:39:40|?|?
 CWKNOWN|instance|The Stockade||partyransport|0||0
 1|2020|Stormwind City|50.374|66.275|3614.497494|1552.665220|?|?|?
 CWKNOWN|instance|The Nexus||partyransport|0||0
 1|4001|Borean Tundra|27.506|25.919|1042.664696|-2661.868743|?|?|?
-CWKNOWNoute|Wintergrard to Wyrmrest Temple FM|Wintergrard to Wyrmrest Temple FM||flight_master|1||0
-1|4004|Dragonblight|77.020|49.790|2577.329088|-2624.123602|2026-04-09 19:14:22|Dragonblight FM|Dragonblight FM
-2|4004|Dragonblight|60.366|51.540|2390.639770|-2611.042009|2026-04-09 19:15:07|Wyrmrest Temple FM|Wyrmrest Temple FM
 CWKNOWN|instance|Halls of Stone||partyransport|0||0
 1|4009|The Storm Peaks|39.439|26.933|2631.768783|-3665.540517|?|?|?
-CWKNOWNoute|FM: Dalaran -> Baneflight|FM: Dalaran -> Baneflight||flight_master|1||0
-1|4003|Dalaran|72.152|45.798|2321.071609|-3100.038763|2026-04-09 21:38:07|Dalaran FM|Dalaran FM
-2|4011|Zul'Drak|13.871|73.614|2697.758072|-2925.588825|2026-04-09 21:38:34|Baneflight FM|Baneflight FM
-CWKNOWNoute|Flight Master: Unu'pe -> Star's Rest|Flight Master: Unu'pe -> Star's Rest||flight_master|1||0
-1|4001|Borean Tundra|78.542|51.520|1630.649248|-2465.239646|2026-04-18 15:16:05|Unu'pe FM|Unu'pe FM
-2|4004|Dragonblight|29.181|55.330|2041.054078|-2582.720999|2026-04-18 15:16:23|Star's Rest FM|Star's Rest FM
 CWKNOWN|instance|The Oculus||partyransport|0||0
 1|4001|Borean Tundra|27.512|26.756|1042.733126|-2655.445006|?|?|?
-CWKNOWNransport|Dalaran|Dalaran||flight_master|1|Dalaranoute|0
-1|4003|Dalaran|35.415|45.538|2274.192310|-3100.259670|2026-04-22 16:41:46|?|?
 CWKNOWN|instance|Utgarde Pinnacle||partyransport|0||0
 1|4006|Howling Fjord|57.279|46.748|3411.519396|-2127.841744|?|?|?
+CWKNOWNoute|Archmage Alvareaux Dalaran|Archmage Alvareaux Dalaran|Archmage Alvareaux Dalaran|route|0||0
+1|4003|Dalaran|25.185|47.750|2261.137550|-3098.377851|2026-04-24 16:35:34|Archmage Alvareaux Dalaran|Archmage Alvareaux Dalaran
+CWKNOWN|instance|Halls of Lightning||partyransport|0||0
+1|4009|The Storm Peaks|45.407|21.357|2716.592280|-3718.378365|?|?|?
+CWKNOWNoute|Dalaran Solo Queue|Dalaran Solo Queue|Dalaran Solo Queue|route|0||0
+1|4012|Dalaran Underbelly|57.425|47.152|2302.279263|-3098.886539|2026-04-28 19:00:27|Dalaran Solo Queue|Dalaran Solo Queue
 CWKNOWNransport|Stormwind City -> Blasted Lands|
 one|portal|0
 T|2020|Stormwind City|49.030|87.267|3609.833607|1601.269920|2004|Blasted Lands|59.008|55.175|4427.690194|2159.778173|Stormwind City -> Blasted Lands|2|1775744572|0
@@ -49,16 +27,6 @@ one|portal|0
 CWKNOWNransport|Hellfire Peninsula -> Stormwind City|
 one|portal|0
 T|3002|Hellfire Peninsula|88.601|52.780|2807.262120|4067.200019|2020|Stormwind City|48.595|87.739|3608.320393|1602.364277|Hellfire Peninsula -> Stormwind City|2|1775744879|0
-one|0
-one|portal|0
-CWKNOWNransport|Stranglethorn Vale -> Tirisfal Glades|
-one|portal|0
-T|2021|Stranglethorn Vale|41.009|6.446|3863.213646|2088.591796|2024|Tirisfal Glades|84.846|51.096|3944.130004|-659.646852|Stranglethorn Vale -> Tirisfal Glades|1|1775742651|0
-one|0
-one|portal|0
-CWKNOWNransport|Tirisfal Glades -> Howling Fjord|
-one|portal|0
-T|2024|Tirisfal Glades|55.426|55.968|3678.249866|-630.290703|4006|Howling Fjord|80.212|26.077|3688.667082|-2294.382142|Tirisfal Glades -> Howling Fjord|1|1775743322|0
 one|0
 one|portal|0
 CWKNOWNransport|Dalaran <-> Underbelly|

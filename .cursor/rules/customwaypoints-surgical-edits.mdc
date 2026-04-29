@@ -1,0 +1,27 @@
+---
+description: Surgical edit discipline for CustomWaypoints.lua
+globs:
+  - "CustomWaypoints/**/*.lua"
+  - "CustomWaypoints.lua"
+alwaysApply: true
+---
+
+# Surgical edit rules
+
+Before adding code:
+
+1. Search for existing helpers and reuse them.
+2. Prefer a small change at the existing decision point over a parallel subsystem.
+3. Do not add top-level `local function` casually. The file is close to Lua 5.1 main-chunk local limits.
+4. Prefer nested local helpers inside the changed function for one-off logic.
+5. For shared helpers, prefer `CW.HelperName = function(...)` only when needed and document why it is public-ish.
+6. Avoid new hidden routing constants. If a constant is policy, name it near the policy or expose it in routing tuning.
+7. Do not wipe the user queue on route/sync failure unless the user explicitly asked to clear.
+8. Add or update debug output for route-policy changes.
+9. Update tests/docs when changing routing, known-location schema, import/export, UI modal behavior, taxi, or discovery.
+
+Patch size smell:
+
+- +20 lines can be okay.
+- +100 lines needs strong justification.
+- +200 lines probably means the patch is not surgical enough for this file.

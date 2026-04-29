@@ -1,0 +1,28 @@
+----- COPY KNOWN LOCATIONS FROM HERE -----
+CWKNOWNoute|Flight Master: Valiance Keep -> Dalaran|Flight Master: Valiance Keep -> Dalaran||flight_master|1||0
+1|4001|Borean Tundra|58.967|68.290|1405.122012|-2336.431341|2026-04-17 19:46:06|Borean Tundra FM|Borean Tundra FM
+2|4003|Dalaran|72.161|45.786|2321.083336|-3100.048723|2026-04-17 19:46:45|Dalaran FM|Dalaran FM
+CWKNOWNoute|Stormwind to Booty Bay FMoute||flight_master|1||0
+1|2020|Stormwind City|70.979|72.542|3686.063435|1567.174495|2026-04-08 20:49:27|Stormwind Flight Master|Flight Master
+2|2021|Stranglethorn Vale|27.504|77.780|3690.852911|2695.537280|2026-04-08 20:49:55|?|?
+CWKNOWNoute|FM: Booty Bay to Westfall|FM: Booty Bay to Westfall||flight_master|1||0
+1|2021|Stranglethorn Vale|27.603|77.782|3692.116265|2695.554684|2026-04-09 01:22:29|?|?
+2|2027|Westfall|56.710|52.694|3577.637667|1925.905676|2026-04-09 01:22:23|?|?
+CWKNOWNoute|FM: Stormwind to Sentinel Hill|FM: Stormwind to Sentinel Hill||flight_master|1||0
+1|2020|Stormwind City|70.996|72.668|3686.123864|1567.466529|2026-04-09 02:04:16|FM: Stormwind to Sentinel Hill|FM: Stormwind to Sentinel Hill
+CWKNOWNoute|FM: Stormwind to Westfall|FM: Stormwind to Westfall||flight_master|1||0
+1|2020|Stormwind City|70.967|72.509|3686.020313|1567.099189|2026-04-09 11:57:58|?|?
+2|2027|Westfall|56.558|52.638|3576.573891|1925.647292|2026-04-09 11:58:08|?|?
+CWKNOWNoute|FM: Stormwind -> Darkshire|FM: Stormwind -> Darkshire||flight_master|1||0
+1|2020|Stormwind City|71.054|72.534|3686.323351|1567.157100|2026-04-09 15:39:21|Stormwind City FM|FM
+2|2008|Duskwood|77.538|44.286|4036.039019|1902.761517|?|?
+CWKNOWNoute|Wintergarde to Wyrmrest Temple FM|Wintergarde to Wyrmrest Temple FM||flight_master|1||0
+1|4004|Dragonblight|77.020|49.790|2577.329088|-2624.123602|2026-04-09 19:14:22|Dragonblight FM|Dragonblight FM
+2|4004|Dragonblight|60.366|51.540|2390.639770|-2611.042009|2026-04-09 19:15:07|Wyrmrest Temple FM|Wyrmrest Temple FM
+CWKNOWNoute|FM: Dalaran -> Baneflight|FM: Dalaran -> Baneflight||flight_master|1||0
+1|4003|Dalaran|72.152|45.798|2321.071609|-3100.038763|2026-04-09 21:38:07|Dalaran FM|Dalaran FM
+2|4011|Zul'Drak|13.871|73.614|2697.758072|-2925.588825|2026-04-09 21:38:34|Baneflight FM|Baneflight FM
+CWKNOWNoute|Flight Master: Unu'pe -> Star's Rest|Flight Master: Unu'pe -> Star's Rest||flight_master|1||0
+1|4001|Borean Tundra|78.542|51.520|1630.649248|-2465.239646|2026-04-18 15:16:05|Unu'pe FM|Unu'pe FM
+2|4004|Dragonblight|29.181|55.330|2041.054078|-2582.720999|2026-04-18 15:16:23|Star's Rest FM|Star's Rest FM
+----- COPY KNOWN LOCATIONS TO HERE -----

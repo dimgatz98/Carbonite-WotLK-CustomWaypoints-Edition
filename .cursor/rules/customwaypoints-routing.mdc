@@ -1,0 +1,27 @@
+---
+description: Routing, graph, transport, subzone rules
+globs:
+  - "CustomWaypoints/**/*.lua"
+  - "CustomWaypoints.lua"
+alwaysApply: true
+---
+
+# Routing rules
+
+- Use `InvalidateRoute(reason)` after route-affecting changes.
+- Do not allow unsafe cross-continent direct walk fallback.
+- Direct flying is allowed only through `CW.CanUseCapabilityDirectFlyingLeg`.
+- Parent/child map-layer transitions require explicit transport or marked parent fallback.
+- Do not replace a child destination with parent silently. Mark fallback metadata.
+- Known transports and learned transports must feed the graph through existing normalization/endpoint helpers.
+- Single-node transports must keep zone/subzone aliases and may synthesize a from-side only through existing alias resolution.
+- Flight Master/taxi transports are bidirectional and may be suppressed when direct flying mode makes them unnecessary.
+- Keep query-node attachment cost-driven. Avoid hard pre-pruning that hides valid transport paths.
+- `FindPathAStar` uses zero heuristic; treat it as uniform-cost search unless a proven admissible heuristic is introduced.
+- Route output must preserve user label/name on queue stop points.
+
+Subzone diagnostics:
+
+- First inspect `/cw list` destination `maI`/mapName before changing graph logic.
+- If queued destination is parent map, fix destination resolution or transport injection.
+- If queued destination is child map and graph ends at parent, inspect explicit transport lookup/fallback continuation.

@@ -254,7 +254,7 @@ Use deep mode for richer transport routing. Use minimal mode when you want the m
 ## Important Notes
 
 - Routes shown while flying on a Flight Master may not always reflect the real taxi path.
-- Questie may affect the map when used alongside Carbonite and CustomWaypoints.
+- Questie may affect the map when used alongside Carbonite. [Here](https://github.com/dimgatz98/Questie-3.3.5a) is a compatible questie version.
 
 ---
 
@@ -272,6 +272,10 @@ Current exported route data can live here:
 CustomWaypoints/data/known_routes_export.txt
 ```
 
+Flight Masters:
+```text
+CustomWaypoints/data/flight_masters_export.txt
+```
 Small additions help: a corrected entrance, a reliable portal, a working transport, or a useful city path can make routing better for everyone.
 
 > If you import shared data, review it first. Some routes may include Flight Master links or transports your character has not discovered.
@@ -284,7 +288,7 @@ Maintenance notes and invariants live in:
 
 ```text
 CustomWaypoints/CHECKPOINT.md
-CustomWaypoints/docs/invariants.md
+CustomWaypoints/docs/INVARIANTS.md
 ```
 
 For routing changes, keep the scope small and preserve the distinction between minimal and deep mode. CustomWaypoints should extend Carbonite safely, not replace it wholesale.

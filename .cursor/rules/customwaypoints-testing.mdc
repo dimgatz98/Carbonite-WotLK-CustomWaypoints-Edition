@@ -1,0 +1,42 @@
+---
+description: Required manual tests for CustomWaypoints changes
+globs:
+  - "CustomWaypoints/**/*.lua"
+  - "CustomWaypoints.lua"
+alwaysApply: true
+---
+
+# Test rules
+
+For any route/transport change, test:
+
+- Same-zone waypoint.
+- Same-continent cross-zone route.
+- Stormwind -> Dalaran.
+- Dalaran -> Underbelly.
+- Underbelly -> Dalaran.
+- Already-inside-subzone target.
+- Single-node transport anchor with zone/subzone hint.
+- Two-point transport with bidirectional on/off.
+- Flight Master checkbox forcing bidirectional.
+- `/cw route` debug output and `/cw list` destination identity.
+
+For any UI change, test:
+
+- ESC.
+- WASD after opening/closing frame.
+- Search focus.
+- Shift+Delete outside and inside search/input boxes.
+
+For any import/export/schema change, test:
+
+- Queue export/import replaces queue.
+- Known locations export/import merges and dedupes.
+- Old exports still import.
+- Bad rows fail safely.
+
+For any sync/failure change, test:
+
+- Route rebuild failure does not wipe queue.
+- Route rebuild failure does not leave misleading stale Carbonite targets/signature.
+- Next valid waypoint can sync successfully.
